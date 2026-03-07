@@ -524,27 +524,26 @@ class ProductReviews(SQLModel, table=True):
     pr_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class BotFeedback(SQLModel, table=True):
-    """
-    Feedback on bot responses for improvement.
+# class BotFeedback(SQLModel, table=True):
+#     """
+#     Feedback on bot responses for improvement
+#     la tabla entera no la veo necesaria, en primeras instancias deberiamos estar analizando el funcionamientos nosotros
 
-    Args:
-        bf_id (Optional[int]): Feedback ID, auto-incremented.
-        bf_m_id (int): Foreign key to message.
-        bf_u_id (int): Foreign key to user.
-        bf_rating (Optional[int]): Rating (1-5).
-        bf_comment (Optional[str]): User feedback comment.
-        bf_was_helpful (Optional[bool]): Whether response was helpful.
-        bf_created_at (datetime): Creation timestamp.
-    """
+#     Args:
+#         bf_id (Optional[int]): Feedback ID, auto-incremented.
+#         bf_m_id (int): Foreign key to message.
+#         bf_u_id (int): Foreign key to user.
+#         bf_rating (Optional[int]): Rating (1-5).
+#         bf_comment (Optional[str]): User feedback comment.
+#         bf_was_helpful (Optional[bool]): Whether response was helpful.
+#         bf_created_at (datetime): Creation timestamp.
+#     """
 
-    bf_id: Optional[int] = id_field("botfeedback")
-    bf_m_id: int = Field(foreign_key="messages.m_id", index=True)
-    bf_u_id: int = Field(foreign_key="users.u_id")
-    bf_rating: Optional[int] = Field(default=None, ge=1, le=5)
-    bf_comment: Optional[str] = Field(default=None, max_length=500)
-    bf_was_helpful: Optional[bool] = Field(default=None)
-    bf_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     bf_id: Optional[int] = id_field("botfeedback")
+#     bf_m_id: int = Field(foreign_key="messages.m_id", index=True)
+#     bf_u_id: int = Field(foreign_key="users.u_id")
+#     bf_was_helpful: Optional[bool] = Field(default=None)
+#     bf_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ============================================================================
@@ -585,247 +584,238 @@ class FAQItems(SQLModel, table=True):
 # NOTIFICATION MODEL
 # ============================================================================
 
-class Notifications(SQLModel, table=True):
-    """
-    System notifications for users.
-    Can be sent via WhatsApp or displayed in app.
+# class Notifications(SQLModel, table=True):
+#     """
+#     System notifications for users.
+#     Can be sent via WhatsApp or displayed in app.
 
-    Args:
-        n_id (Optional[int]): Notification ID, auto-incremented.
-        n_u_id (int): Foreign key to user.
-        n_type (NotificationType): Notification type.
-        n_title (str): Short title.
-        n_message (str): Full message content.
-        n_data (Optional[dict]): Additional JSON data.
-        n_is_read (bool): Whether user has read it.
-        n_sent_via_whatsapp (bool): Whether sent via WhatsApp.
-        n_whatsapp_message_id (Optional[str]): WhatsApp message ID if sent.
-        n_scheduled_for (Optional[datetime]): Scheduled send time.
-        n_sent_at (Optional[datetime]): Actual send time.
-        n_created_at (datetime): Creation timestamp.
-    """
+#     Args:
+#         n_id (Optional[int]): Notification ID, auto-incremented.
+#         n_u_id (int): Foreign key to user.
+#         n_type (NotificationType): Notification type.
+#         n_title (str): Short title.
+#         n_message (str): Full message content.
+#         n_data (Optional[dict]): Additional JSON data.
+#         n_is_read (bool): Whether user has read it.
+#         n_sent_via_whatsapp (bool): Whether sent via WhatsApp.
+#         n_whatsapp_message_id (Optional[str]): WhatsApp message ID if sent.
+#         n_scheduled_for (Optional[datetime]): Scheduled send time.
+#         n_sent_at (Optional[datetime]): Actual send time.
+#         n_created_at (datetime): Creation timestamp.
+#     """
 
-    n_id: Optional[int] = id_field("notifications")
-    n_u_id: int = Field(foreign_key="users.u_id", index=True)
-    n_type: NotificationType = Field(default=NotificationType.SYSTEM)
-    n_title: str = Field(max_length=200)
-    n_message: str = Field(sa_column=Column(Text))
-    n_data: Optional[dict] = Field(default=None, sa_column=Column(JSON))
-    n_is_read: bool = Field(default=False)
-    n_sent_via_whatsapp: bool = Field(default=False)
-    n_whatsapp_message_id: Optional[str] = Field(default=None, max_length=100)
-    n_scheduled_for: Optional[datetime] = Field(default=None)
-    n_sent_at: Optional[datetime] = Field(default=None)
-    n_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # n_id: Optional[int] = id_field("notifications")
+    # n_u_id: int = Field(foreign_key="users.u_id", index=True)
+    # n_type: NotificationType = Field(default=NotificationType.SYSTEM)
+    # n_message: str = Field(sa_column=Column(Text))
+    # n_sent_via_whatsapp: bool = Field(default=False)
+    # n_whatsapp_message_id: Optional[str] = Field(default=None, max_length=100)
+    # n_sent_at: Optional[datetime] = Field(default=None)
+    # n_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ============================================================================
 # STORE SETTINGS & CONFIGURATION
 # ============================================================================
 
-class StoreSettings(SQLModel, table=True):
-    """
-    Key-value store settings and configuration.
+# class StoreSettings(SQLModel, table=True):
+#     """
+#     Key-value store settings and configuration.
 
-    Args:
-        ss_id (Optional[int]): Setting ID, auto-incremented.
-        ss_s_id (Optional[int]): Foreign key to store (null = global).
-        ss_key (str): Setting key.
-        ss_value (Optional[str]): Setting value (text).
-        ss_value_json (Optional[dict]): Setting value (JSON for complex values).
-        ss_description (Optional[str]): What this setting does.
-        ss_is_public (bool): Whether visible to customers.
-        ss_updated_at (datetime): Last update timestamp.
-    """
+#     Args:
+#         ss_id (Optional[int]): Setting ID, auto-incremented.
+#         ss_s_id (Optional[int]): Foreign key to store (null = global).
+#         ss_key (str): Setting key.
+#         ss_value (Optional[str]): Setting value (text).
+#         ss_value_json (Optional[dict]): Setting value (JSON for complex values).
+#         ss_description (Optional[str]): What this setting does.
+#         ss_is_public (bool): Whether visible to customers.
+#         ss_updated_at (datetime): Last update timestamp.
+#     """
 
-    __table_args__ = (
-        UniqueConstraint("ss_s_id", "ss_key", name="unique_store_setting"),
-    )
+#     __table_args__ = (
+#         UniqueConstraint("ss_s_id", "ss_key", name="unique_store_setting"),
+#     )
 
-    ss_id: Optional[int] = id_field("storesettings")
-    ss_s_id: Optional[int] = Field(default=None, foreign_key="stores.s_id")
-    ss_key: str = Field(max_length=100, index=True)
-    ss_value: Optional[str] = Field(default=None, sa_column=Column(Text))
-    ss_value_json: Optional[dict] = Field(default=None, sa_column=Column(JSON))
-    ss_description: Optional[str] = Field(default=None, max_length=500)
-    ss_is_public: bool = Field(default=False)
-    ss_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     ss_id: Optional[int] = id_field("storesettings")
+#     ss_s_id: Optional[int] = Field(default=None, foreign_key="stores.s_id")
+#     ss_key: str = Field(max_length=100, index=True) #cual es la diferencia con key?
+#     ss_value: Optional[str] = Field(default=None, sa_column=Column(Text))
+#     ss_description: Optional[str] = Field(default=None, max_length=500)
+#     ss_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class BusinessHours(SQLModel, table=True):
-    """
-    Store business hours.
+# class BusinessHours(SQLModel, table=True):
+#     """
+#     Store business hours.
 
-    Args:
-        bh_id (Optional[int]): Business hours ID, auto-incremented.
-        bh_s_id (int): Foreign key to store.
-        bh_day_of_week (int): Day (0=Monday, 6=Sunday).
-        bh_open_time (Optional[str]): Opening time (e.g., "09:00").
-        bh_close_time (Optional[str]): Closing time (e.g., "18:00").
-        bh_is_closed (bool): Whether closed this day.
-    """
+#     Args:
+#         bh_id (Optional[int]): Business hours ID, auto-incremented.
+#         bh_s_id (int): Foreign key to store.
+#         bh_day_of_week (int): Day (0=Monday, 6=Sunday).
+#         bh_open_time (Optional[str]): Opening time (e.g., "09:00").
+#         bh_close_time (Optional[str]): Closing time (e.g., "18:00").
+#         bh_is_closed (bool): Whether closed this day.
+#     """
 
-    __table_args__ = (
-        UniqueConstraint("bh_s_id", "bh_day_of_week", name="unique_business_hours"),
-        CheckConstraint("bh_day_of_week >= 0 AND bh_day_of_week <= 6", name="check_day_range"),
-    )
+#     __table_args__ = (
+#         UniqueConstraint("bh_s_id", "bh_day_of_week", name="unique_business_hours"),
+#         CheckConstraint("bh_day_of_week >= 0 AND bh_day_of_week <= 6", name="check_day_range"),
+#     )
 
-    bh_id: Optional[int] = id_field("businesshours")
-    bh_s_id: int = Field(foreign_key="stores.s_id", index=True)
-    bh_day_of_week: int = Field(ge=0, le=6)
-    bh_open_time: Optional[str] = Field(default=None, max_length=5)
-    bh_close_time: Optional[str] = Field(default=None, max_length=5)
-    bh_is_closed: bool = Field(default=False)
+#     bh_id: Optional[int] = id_field("businesshours")
+#     bh_s_id: int = Field(foreign_key="stores.s_id", index=True)
+#     bh_day_of_week: int = Field(ge=0, le=6)
+#     bh_open_time: Optional[str] = Field(default=None, max_length=5)
+#     bh_close_time: Optional[str] = Field(default=None, max_length=5)
 
 
 # ============================================================================
 # DELIVERY & SHIPPING MODELS
 # ============================================================================
 
-class DeliveryZones(SQLModel, table=True):
-    """
-    Delivery zones/areas for a store.
+# class DeliveryZones(SQLModel, table=True):
+#     """
+#     Delivery zones/areas for a store.
 
-    Args:
-        dz_id (Optional[int]): Zone ID, auto-incremented.
-        dz_s_id (int): Foreign key to store.
-        dz_name (str): Zone name.
-        dz_polygon (Optional[dict]): GeoJSON polygon defining the zone.
-        dz_postal_codes (Optional[list]): JSON list of postal codes.
-        dz_delivery_fee (float): Delivery fee for this zone.
-        dz_min_order_amount (Optional[float]): Minimum order for delivery.
-        dz_free_delivery_above (Optional[float]): Free delivery threshold.
-        dz_estimated_time_minutes (Optional[int]): Estimated delivery time.
-        dz_is_active (bool): Whether zone is serviced.
-    """
+#     Args:
+#         dz_id (Optional[int]): Zone ID, auto-incremented.
+#         dz_s_id (int): Foreign key to store.
+#         dz_name (str): Zone name.
+#         dz_polygon (Optional[dict]): GeoJSON polygon defining the zone.
+#         dz_postal_codes (Optional[list]): JSON list of postal codes.
+#         dz_delivery_fee (float): Delivery fee for this zone.
+#         dz_min_order_amount (Optional[float]): Minimum order for delivery.
+#         dz_free_delivery_above (Optional[float]): Free delivery threshold.
+#         dz_estimated_time_minutes (Optional[int]): Estimated delivery time.
+#         dz_is_active (bool): Whether zone is serviced.
+#     """
 
-    dz_id: Optional[int] = id_field("deliveryzones")
-    dz_s_id: int = Field(foreign_key="stores.s_id", index=True)
-    dz_name: str = Field(max_length=100)
-    dz_polygon: Optional[dict] = Field(default=None, sa_column=Column(JSON))
-    dz_postal_codes: Optional[list] = Field(default=None, sa_column=Column(JSON))
-    dz_delivery_fee: float = Field(default=0.0, ge=0.0)
-    dz_min_order_amount: Optional[float] = Field(default=None, ge=0.0)
-    dz_free_delivery_above: Optional[float] = Field(default=None, ge=0.0)
-    dz_estimated_time_minutes: Optional[int] = Field(default=None, ge=0)
-    dz_is_active: bool = Field(default=True)
+#     dz_id: Optional[int] = id_field("deliveryzones")
+#     dz_s_id: int = Field(foreign_key="stores.s_id", index=True)
+#     dz_name: str = Field(max_length=100)
+#     dz_polygon: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+#     dz_postal_codes: Optional[list] = Field(default=None, sa_column=Column(JSON))
+#     dz_delivery_fee: float = Field(default=0.0, ge=0.0)
+#     dz_min_order_amount: Optional[float] = Field(default=None, ge=0.0)
+#     dz_free_delivery_above: Optional[float] = Field(default=None, ge=0.0)
+#     dz_estimated_time_minutes: Optional[int] = Field(default=None, ge=0)
+#     dz_is_active: bool = Field(default=True)
 
 
-class Deliveries(SQLModel, table=True):
-    """
-    Delivery tracking for orders.
+# class Deliveries(SQLModel, table=True):
+#     """
+#     Delivery tracking for orders.
 
-    Args:
-        d_id (Optional[int]): Delivery ID, auto-incremented.
-        d_o_id (int): Foreign key to order.
-        d_dz_id (Optional[int]): Foreign key to delivery zone.
-        d_driver_name (Optional[str]): Delivery driver name.
-        d_driver_phone (Optional[str]): Driver phone number.
-        d_tracking_number (Optional[str]): External tracking number.
-        d_status (str): Delivery status.
-        d_scheduled_date (Optional[date]): Scheduled delivery date.
-        d_scheduled_time_slot (Optional[str]): Time slot.
-        d_picked_up_at (Optional[datetime]): When picked up for delivery.
-        d_delivered_at (Optional[datetime]): Actual delivery time.
-        d_delivery_notes (Optional[str]): Delivery notes.
-        d_proof_of_delivery_url (Optional[str]): Photo proof URL.
-        d_signature_url (Optional[str]): Signature image URL.
-        d_latitude (Optional[float]): Delivery location latitude.
-        d_longitude (Optional[float]): Delivery location longitude.
-        d_created_at (datetime): Creation timestamp.
-        d_updated_at (datetime): Last update timestamp.
-    """
+#     Args:
+#         d_id (Optional[int]): Delivery ID, auto-incremented.
+#         d_o_id (int): Foreign key to order.
+#         d_dz_id (Optional[int]): Foreign key to delivery zone.
+#         d_driver_name (Optional[str]): Delivery driver name.
+#         d_driver_phone (Optional[str]): Driver phone number.
+#         d_tracking_number (Optional[str]): External tracking number.
+#         d_status (str): Delivery status.
+#         d_scheduled_date (Optional[date]): Scheduled delivery date.
+#         d_scheduled_time_slot (Optional[str]): Time slot.
+#         d_picked_up_at (Optional[datetime]): When picked up for delivery.
+#         d_delivered_at (Optional[datetime]): Actual delivery time.
+#         d_delivery_notes (Optional[str]): Delivery notes.
+#         d_proof_of_delivery_url (Optional[str]): Photo proof URL.
+#         d_signature_url (Optional[str]): Signature image URL.
+#         d_latitude (Optional[float]): Delivery location latitude.
+#         d_longitude (Optional[float]): Delivery location longitude.
+#         d_created_at (datetime): Creation timestamp.
+#         d_updated_at (datetime): Last update timestamp.
+#     """
 
-    d_id: Optional[int] = id_field("deliveries")
-    d_o_id: int = Field(foreign_key="orders.o_id", unique=True, index=True)
-    d_dz_id: Optional[int] = Field(default=None, foreign_key="deliveryzones.dz_id")
-    d_driver_name: Optional[str] = Field(default=None, max_length=100)
-    d_driver_phone: Optional[str] = Field(default=None, max_length=20)
-    d_tracking_number: Optional[str] = Field(default=None, max_length=100)
-    d_status: str = Field(default="pending", max_length=30)
-    d_scheduled_date: Optional[date] = Field(default=None)
-    d_scheduled_time_slot: Optional[str] = Field(default=None, max_length=50)
-    d_picked_up_at: Optional[datetime] = Field(default=None)
-    d_delivered_at: Optional[datetime] = Field(default=None)
-    d_delivery_notes: Optional[str] = Field(default=None, sa_column=Column(Text))
-    d_proof_of_delivery_url: Optional[str] = Field(default=None, max_length=500)
-    d_signature_url: Optional[str] = Field(default=None, max_length=500)
-    d_latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
-    d_longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
-    d_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    d_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     d_id: Optional[int] = id_field("deliveries")
+#     d_o_id: int = Field(foreign_key="orders.o_id", unique=True, index=True)
+#     d_dz_id: Optional[int] = Field(default=None, foreign_key="deliveryzones.dz_id")
+#     d_driver_name: Optional[str] = Field(default=None, max_length=100)
+#     d_driver_phone: Optional[str] = Field(default=None, max_length=20)
+#     d_tracking_number: Optional[str] = Field(default=None, max_length=100)
+#     d_status: str = Field(default="pending", max_length=30)
+#     d_scheduled_date: Optional[date] = Field(default=None)
+#     d_scheduled_time_slot: Optional[str] = Field(default=None, max_length=50)
+#     d_picked_up_at: Optional[datetime] = Field(default=None)
+#     d_delivered_at: Optional[datetime] = Field(default=None)
+#     d_delivery_notes: Optional[str] = Field(default=None, sa_column=Column(Text))
+#     d_proof_of_delivery_url: Optional[str] = Field(default=None, max_length=500)
+#     d_signature_url: Optional[str] = Field(default=None, max_length=500)
+#     d_latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+#     d_longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+#     d_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     d_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ============================================================================
 # ANALYTICS & LOGGING MODELS
 # ============================================================================
 
-class BotAnalytics(SQLModel, table=True):
-    """
-    Daily analytics for bot performance.
+# class BotAnalytics(SQLModel, table=True):
+#     """
+#     Daily analytics for bot performance.
 
-    Args:
-        ba_id (Optional[int]): Analytics ID, auto-incremented.
-        ba_date (date): Date of metrics.
-        ba_total_conversations (int): Total conversations started.
-        ba_total_messages (int): Total messages exchanged.
-        ba_inbound_messages (int): Messages from users.
-        ba_outbound_messages (int): Messages from bot.
-        ba_unique_users (int): Unique users interacting.
-        ba_new_users (int): New users registered.
-        ba_orders_placed (int): Orders placed via bot.
-        ba_revenue (float): Total revenue from bot orders.
-        ba_avg_response_time_ms (Optional[float]): Average response time.
-        ba_escalation_rate (Optional[float]): Percentage escalated to human.
-        ba_satisfaction_score (Optional[float]): Average satisfaction score.
-        ba_created_at (datetime): Creation timestamp.
-    """
+#     Args:
+#         ba_id (Optional[int]): Analytics ID, auto-incremented.
+#         ba_date (date): Date of metrics.
+#         ba_total_conversations (int): Total conversations started.
+#         ba_total_messages (int): Total messages exchanged.
+#         ba_inbound_messages (int): Messages from users.
+#         ba_outbound_messages (int): Messages from bot.
+#         ba_unique_users (int): Unique users interacting.
+#         ba_new_users (int): New users registered.
+#         ba_orders_placed (int): Orders placed via bot.
+#         ba_revenue (float): Total revenue from bot orders.
+#         ba_avg_response_time_ms (Optional[float]): Average response time.
+#         ba_escalation_rate (Optional[float]): Percentage escalated to human.
+#         ba_satisfaction_score (Optional[float]): Average satisfaction score.
+#         ba_created_at (datetime): Creation timestamp.
+#     """
 
-    ba_id: Optional[int] = id_field("botanalytics")
-    ba_date: date = Field(unique=True, index=True)
-    ba_total_conversations: int = Field(default=0, ge=0)
-    ba_total_messages: int = Field(default=0, ge=0)
-    ba_inbound_messages: int = Field(default=0, ge=0)
-    ba_outbound_messages: int = Field(default=0, ge=0)
-    ba_unique_users: int = Field(default=0, ge=0)
-    ba_new_users: int = Field(default=0, ge=0)
-    ba_orders_placed: int = Field(default=0, ge=0)
-    ba_revenue: float = Field(default=0.0, ge=0.0)
-    ba_avg_response_time_ms: Optional[float] = Field(default=None, ge=0.0)
-    ba_escalation_rate: Optional[float] = Field(default=None, ge=0.0, le=100.0)
-    ba_satisfaction_score: Optional[float] = Field(default=None, ge=0.0, le=5.0)
-    ba_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     ba_id: Optional[int] = id_field("botanalytics")
+#     ba_date: date = Field(unique=True, index=True)
+#     ba_total_conversations: int = Field(default=0, ge=0)
+#     ba_total_messages: int = Field(default=0, ge=0)
+#     ba_inbound_messages: int = Field(default=0, ge=0)
+#     ba_outbound_messages: int = Field(default=0, ge=0)
+#     ba_unique_users: int = Field(default=0, ge=0)
+#     ba_new_users: int = Field(default=0, ge=0)
+#     ba_orders_placed: int = Field(default=0, ge=0)
+#     ba_revenue: float = Field(default=0.0, ge=0.0)
+#     ba_avg_response_time_ms: Optional[float] = Field(default=None, ge=0.0)
+#     ba_escalation_rate: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+#     ba_satisfaction_score: Optional[float] = Field(default=None, ge=0.0, le=5.0)
+#     ba_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class AuditLog(SQLModel, table=True):
-    """
-    Audit log for important system events.
+# class AuditLog(SQLModel, table=True):
+#     """
+#     Audit log for important system events.
 
-    Args:
-        al_id (Optional[int]): Log entry ID, auto-incremented.
-        al_entity_type (str): Type of entity (user, order, product).
-        al_entity_id (int): ID of the entity.
-        al_action (str): Action performed (create, update, delete).
-        al_actor_type (str): Who performed (user, system, admin).
-        al_actor_id (Optional[str]): ID of the actor.
-        al_old_values (Optional[dict]): Previous values (JSON).
-        al_new_values (Optional[dict]): New values (JSON).
-        al_ip_address (Optional[str]): IP address if applicable.
-        al_user_agent (Optional[str]): User agent string.
-        al_created_at (datetime): Timestamp of event.
-    """
+#     Args:
+#         al_id (Optional[int]): Log entry ID, auto-incremented.
+#         al_entity_type (str): Type of entity (user, order, product).
+#         al_entity_id (int): ID of the entity.
+#         al_action (str): Action performed (create, update, delete).
+#         al_actor_type (str): Who performed (user, system, admin).
+#         al_actor_id (Optional[str]): ID of the actor.
+#         al_old_values (Optional[dict]): Previous values (JSON).
+#         al_new_values (Optional[dict]): New values (JSON).
+#         al_ip_address (Optional[str]): IP address if applicable.
+#         al_user_agent (Optional[str]): User agent string.
+#         al_created_at (datetime): Timestamp of event.
+#     """
 
-    al_id: Optional[int] = id_field("auditlog")
-    al_entity_type: str = Field(max_length=50, index=True)
-    al_entity_id: int
-    al_action: str = Field(max_length=50)
-    al_actor_type: str = Field(max_length=20)
-    al_actor_id: Optional[str] = Field(default=None, max_length=50)
-    al_old_values: Optional[dict] = Field(default=None, sa_column=Column(JSON))
-    al_new_values: Optional[dict] = Field(default=None, sa_column=Column(JSON))
-    al_ip_address: Optional[str] = Field(default=None, max_length=45)
-    al_user_agent: Optional[str] = Field(default=None, max_length=500)
-    al_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     al_id: Optional[int] = id_field("auditlog")
+#     al_entity_type: str = Field(max_length=50, index=True)
+#     al_entity_id: int
+#     al_action: str = Field(max_length=50)
+#     al_actor_type: str = Field(max_length=20)
+#     al_actor_id: Optional[str] = Field(default=None, max_length=50)
+#     al_ip_address: Optional[str] = Field(default=None, max_length=45)
+#     al_user_agent: Optional[str] = Field(default=None, max_length=500)
+#     al_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ============================================================================
