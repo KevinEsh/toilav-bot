@@ -1,5 +1,5 @@
-# from chatbot_schema import CHATBOT_MODELS
-# from dbconfig import create_db_and_tables
+from chatbot_schema import CHATBOT_MODELS
+from dbconfig import create_db_and_tables
 
 if __name__ == "__main__":
     """
@@ -11,4 +11,4 @@ if __name__ == "__main__":
 
     data = environ.get("DATABASE_ENGINE")  # Ensure DATABASE_ENGINE is set in the environment
     print(f"Initializing database at {data}...")
-    # create_db_and_tables()
+    create_db_and_tables()

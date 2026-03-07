@@ -7,10 +7,9 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy.dialects.postgresql import JSONB
+# from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import (
     JSON,
-    CheckConstraint,
     Column,
     Field,
     Sequence,
@@ -69,12 +68,10 @@ class CustomerStatus(str, Enum):
 class ProductUnit(str, Enum):
     UNIT = "unit"
     KG = "kg"
+    GR = "gr"
     LITER = "liter"
+    ML = "ml"
     METER = "meter"
-    SQUARE_METER = "square_meter"
-    CUBIC_METER = "cubic_meter"
-    HOUR = "hour"
-    DAY = "day"
     OTHER = "other"
 
 
@@ -198,7 +195,6 @@ class Users(SQLModel, table=True):
     """
 
     u_id: int = id_field("users")
-    u_s_id: int = Field(foreign_key="stores.s_id", index=True)
     u_email: str = Field(unique=True, index=True, max_length=255)
     u_username: str = Field(max_length=100)
     u_password_hash: str = Field(max_length=255)
@@ -262,6 +258,7 @@ class Products(SQLModel, table=True):
         p_description (Optional[str]): Description of the product.
         p_price (float): Regular selling price.
         p_currency (str): Currency code (USD, EUR, etc.).
+        p_quantity (int):
         p_unit (ProductUnit): Unit of measure (kg, piece, liter).
         p_image_uuid (Optional[str]): UUID for product image. Stored separately in an object storage service.
         p_properties (Optional[dict]): JSON object for custom properties such as color, size, material, etc.
@@ -277,9 +274,10 @@ class Products(SQLModel, table=True):
     p_description: Optional[str] = Field(default=None, sa_column=Column(Text))
     p_sale_price: float = Field(default=0.0, ge=0.0)
     p_currency: str = Field(default="MXN", max_length=3)
+    p_net_content: float = Field(default=1.0, ge=0.0)
     p_unit: ProductUnit = Field(default=ProductUnit.UNIT)
     p_image_uuid: Optional[str] = Field(default=None)
-    p_properties: Optional[dict] = Field(default=None, sa_column=Column(JSONB))
+    p_properties: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     p_rag_text: Optional[str] = Field(default=None, sa_column=Column(Text))
     p_is_available: bool = Field(default=True)
     p_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -303,7 +301,7 @@ class Stores(SQLModel, table=True):
     s_id: Optional[int] = id_field("stores")
     s_name: str = Field(unique=True)
     s_description: Optional[str] = Field(default=None, sa_column=Column(Text))
-    s_properties: Optional[dict] = Field(default=None, sa_column=Column(JSONB))
+    s_properties: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     s_rag_text: Optional[str] = Field(default=None, sa_column=Column(Text))
     s_longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
     s_latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
@@ -544,7 +542,7 @@ class MessageTemplates(SQLModel, table=True):
         mt_updated_at (datetime): Last update timestamp.
     """
 
-    __table_args__ = (UniqueConstraint("mt_name", "mt_language", name="unique_template"),)
+    # __table_args__ = (UniqueConstraint("mt_name", "mt_language", name="unique_template"),)
 
     mt_id: int = id_field("messagetemplates")
     mt_name: str = Field(max_length=100)
@@ -688,14 +686,14 @@ class FAQItems(SQLModel, table=True):
 #         n_created_at (datetime): Creation timestamp.
 #     """
 
-    # n_id: Optional[int] = id_field("notifications")
-    # n_u_id: int = Field(foreign_key="users.u_id", index=True)
-    # n_type: NotificationType = Field(default=NotificationType.SYSTEM)
-    # n_message: str = Field(sa_column=Column(Text))
-    # n_sent_via_whatsapp: bool = Field(default=False)
-    # n_whatsapp_message_id: Optional[str] = Field(default=None, max_length=100)
-    # n_sent_at: Optional[datetime] = Field(default=None)
-    # n_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+# n_id: Optional[int] = id_field("notifications")
+# n_u_id: int = Field(foreign_key="users.u_id", index=True)
+# n_type: NotificationType = Field(default=NotificationType.SYSTEM)
+# n_message: str = Field(sa_column=Column(Text))
+# n_sent_via_whatsapp: bool = Field(default=False)
+# n_whatsapp_message_id: Optional[str] = Field(default=None, max_length=100)
+# n_sent_at: Optional[datetime] = Field(default=None)
+# n_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ============================================================================
@@ -920,18 +918,18 @@ CHATBOT_MODELS = [
     Messages,
     MessageTemplates,
     # Feedback
-    BotFeedback,
-    # FAQ
+    # BotFeedback,
+    # # FAQ
     FAQItems,
-    # Notifications
-    Notifications,
-    # Settings
-    StoreSettings,
-    BusinessHours,
-    # Delivery
-    DeliveryZones,
-    Deliveries,
-    # Analytics
-    BotAnalytics,
-    AuditLog,
+    # # Notifications
+    # Notifications,
+    # # Settings
+    # StoreSettings,
+    # BusinessHours,
+    # # Delivery
+    # DeliveryZones,
+    # Deliveries,
+    # # Analytics
+    # BotAnalytics,
+    # AuditLog,
 ]
