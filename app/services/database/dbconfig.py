@@ -9,15 +9,15 @@ from sqlmodel import Session, SQLModel, create_engine
 # check if the database file exists
 # If not, it will be created when the first table is created
 DATABASE_ENGINE = environ.get("DATABASE_ENGINE", "duckdb")
-DATABASE_NAME = "dbcore"
+DATABASE_NAME = environ.get("DATABASE_NAME", "tremenda-test")
 
 if DATABASE_ENGINE == "duckdb":
-    DATABASE_URL = "duckdb:///./data/core.db"
+    DATABASE_URL = "duckdb:///./data/dummy.db"
 elif DATABASE_ENGINE == "postgresql":
     POSTGRES_USER = environ.get("POSTGRES_USER", "admin")
     POSTGRES_PASSWORD = environ.get("POSTGRES_PASSWORD", "password")
     POSTGRES_HOST = environ.get("POSTGRES_HOST", "localhost")
-    POSTGRES_PORT = 5432
+    POSTGRES_PORT = environ.get("POSTGRES_PORT", 5432)
     DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{DATABASE_NAME}"
 else:
     raise ValueError(f"Unsupported DATABASE_ENGINE: {DATABASE_ENGINE}")

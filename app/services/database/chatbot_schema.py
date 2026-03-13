@@ -12,6 +12,7 @@ from sqlmodel import (
     JSON,
     Column,
     Field,
+    Numeric,
     Sequence,
     SQLModel,
     Text,
@@ -183,10 +184,9 @@ class Users(SQLModel, table=True):
 
     Args:
         u_id (int): User ID, auto-incremented.
-        u_s_id (int): Foreign key to the store this user belongs to.
         u_email (str): Email address (unique login identifier).
+        u_username (str): Display name.
         u_password_hash (str): Hashed password (never store plaintext).
-        u_name (str): Display name.
         u_role (UserRole): Role (owner, manager, staff).
         u_is_active (bool): Whether the account is active.
         u_last_login_at (Optional[datetime]): Last login timestamp.
@@ -267,12 +267,10 @@ class Products(SQLModel, table=True):
         p_updated_at (datetime): Last update timestamp.
     """
 
-    __table_args__ = ()
-
     p_id: int = id_field("products")
     p_name: str = Field(unique=True)
     p_description: Optional[str] = Field(default=None, sa_column=Column(Text))
-    p_sale_price: float = Field(default=0.0, ge=0.0)
+    p_sale_price: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
     p_currency: str = Field(default="MXN", max_length=3)
     p_net_content: float = Field(default=1.0, ge=0.0)
     p_unit: ProductUnit = Field(default=ProductUnit.UNIT)
@@ -315,18 +313,18 @@ class Sales(SQLModel, table=True):
     analytics, trends, and showcasing popular products in the chatbot.
 
     Args:
-        s_id (Optional[int]): Sale ID, auto-incremented.
-        s_p_id (int): Foreign key referencing the product.
-        s_s_id (int): Foreign key referencing the store.
-        s_date (date): Date of the sale.
-        s_units_sold (int): Number of units sold on this date, product, and store
+        sa_id (Optional[int]): Sale ID, auto-incremented.
+        sa_p_id (int): Foreign key referencing the product.
+        sa_s_id (int): Foreign key referencing the store.
+        sa_date (date): Date of the sale.
+        sa_units_sold (int): Number of units sold on this date, product, and store
     """
 
     __table_args__ = (UniqueConstraint("sa_p_id", "sa_s_id", "sa_date", name="unique_sale"),)
 
     sa_id: Optional[int] = id_field("sales")
     sa_p_id: int = Field(foreign_key="products.p_id")
-    sa_s_id: int = Field(foreign_key="stores.s_id")
+    sa_s_id: int = Field(foreign_key="stores.s_id", index=True)
     sa_date: date = Field(default_factory=date.today)
     sa_units_sold: int = Field(ge=0)
     sa_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -346,7 +344,7 @@ class Stocks(SQLModel, table=True):
         st_datetime (datetime): Timestamp of the stock record.
     """
 
-    __table_args__ = (UniqueConstraint("st_p_id", "st_s_id", name="unique_stock"),)
+    __table_args__ = (UniqueConstraint("st_p_id", "st_s_id", "st_datetime", name="unique_stock"),)
 
     st_id: Optional[int] = id_field("stocks")
     st_p_id: int = Field(foreign_key="products.p_id")
@@ -389,14 +387,15 @@ class Orders(SQLModel, table=True):
     """
 
     o_id: int = id_field("orders")
-    o_code: str = Field(unique=True, max_length=30, index=True)
+    # o_code: str = Field(unique=True, max_length=30, index=True)
     o_c_id: int = Field(foreign_key="customers.c_id", index=True)
     o_s_id: int = Field(foreign_key="stores.s_id", index=True)
+    o_status: OrderStatus = Field(default=OrderStatus.PENDING)
     # Amounts
-    o_subtotal: float = Field(default=0.0, ge=0.0)
-    o_discount_amount: Optional[float] = Field(default=None, ge=0.0)
-    o_shipping_amount: Optional[float] = Field(default=None, ge=0.0)
-    o_total: float = Field(default=0.0, ge=0.0)
+    o_subtotal: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
+    o_discount_amount: Optional[float] = Field(default=None, ge=0.0, sa_column=Column(Numeric(10, 2)))
+    o_shipping_amount: Optional[float] = Field(default=None, ge=0.0, sa_column=Column(Numeric(10, 2)))
+    o_total: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
     o_currency: str = Field(default="MXN", max_length=3)
     # Payment
     o_payment_method: Optional[PaymentMethod] = Field(default=None)
@@ -424,6 +423,7 @@ class OrderItems(SQLModel, table=True):
         oi_o_id (int): Foreign key to order.
         oi_p_id (int): Foreign key to product.
         oi_units (int): Quantity ordered.
+        oi_unit_price (float): Price per unit at time of purchase (snapshot).
         oi_discount_amount (Optional[float]): Discount applied to this item.
         oi_created_at (datetime): Creation timestamp.
         oi_updated_at (datetime): Last update timestamp.
@@ -434,7 +434,8 @@ class OrderItems(SQLModel, table=True):
     # index=True because we will often query items by order ID
     oi_p_id: int = Field(foreign_key="products.p_id")
     oi_units: int = Field(ge=1)
-    oi_discount_amount: Optional[float] = Field(default=None, ge=0.0)
+    oi_unit_price: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
+    oi_discount_amount: Optional[float] = Field(default=None, ge=0.0, sa_column=Column(Numeric(10, 2)))
     oi_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     oi_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -545,7 +546,7 @@ class MessageTemplates(SQLModel, table=True):
     # __table_args__ = (UniqueConstraint("mt_name", "mt_language", name="unique_template"),)
 
     mt_id: int = id_field("messagetemplates")
-    mt_name: str = Field(max_length=100)
+    mt_name: str = Field(unique=True, max_length=100)
     # mt_language: str = Field(default="es", max_length=10)
     # mt_category: Optional[str] = Field(default=None, max_length=50)
     mt_content: str = Field(sa_column=Column(Text))
@@ -908,8 +909,11 @@ CHATBOT_MODELS = [
     # Users & Customers
     Users,
     Customers,
-    # Products
+    # Products & Inventory
     Products,
+    Stores,
+    Sales,
+    Stocks,
     # Orders
     Orders,
     OrderItems,

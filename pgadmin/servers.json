@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "tremenda-test",
+      "Group": "Servers",
+      "Host": "postgres-database",
+      "Port": 5432,
+      "MaintenanceDB": "tremenda-test",
+      "Username": "admin",
+      "SSLMode": "prefer"
+    }
+  }
+}

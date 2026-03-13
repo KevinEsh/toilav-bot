@@ -1,7 +1,7 @@
 services:
-  toilav-database:
-    image: "postgres:15-alpine"
-    container_name: toilav-database
+  postgres-database:
+    image: "postgres:18-alpine"
+    container_name: postgres-database
     restart: always
     environment:
       - POSTGRES_USER=${POSTGRES_USER}
@@ -11,7 +11,8 @@ services:
       - "${POSTGRES_PORT}:5432"
     command: ["postgres", "-c", "log_statement=none", "-c", "wal_level=logical"]
     volumes:
-      - toilav-database-volume:/var/lib/postgresql/data
+      - postgres-database-volume:/var/lib/postgresql
+      - ./postgres-init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -21,23 +22,53 @@ services:
       - toilav-network
 
   pgadmin:
-    image: dpage/pgadmin4
+    image: dpage/pgadmin4:9.13
     container_name: database-pgadmin
-    ports:
-      - 5433:80
-    # env_file:
-      # - .env
-    environment:
-      - PGADMIN_DEFAULT_EMAIL=admin@admin.com
-      - PGADMIN_DEFAULT_PASSWORD=${POSTGRES_PASSWORD}
-      - PGADMIN_CONFIG_SERVER_MODE=False
-    depends_on:
-      - toilav-database
     networks:
       - toilav-network
+    ports:
+      - 5433:80
+    env_file:
+      - .env
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@admin.com
+      - PGADMIN_DEFAULT_PASSWORD=password
+      - PGADMIN_CONFIG_SERVER_MODE=False
+      - PGADMIN_CONFIG_SESSION_COOKIE_SAMESITE='Lax'
+      - PGADMIN_CONFIG_SESSION_COOKIE_SECURE=False
+      - PGADMIN_CONFIG_WTF_CSRF_SSL_STRICT=False
+    depends_on:
+      - postgres-database
     volumes:
       - pgadmin-volume:/var/lib/pgadmin/
 
+  adminer:
+    image: adminer
+    container_name: database-adminer
+    ports:
+      - 5434:8080
+    depends_on:
+      - postgres-database
+    networks:
+      - toilav-network
+
+  database-build:
+    build:
+      context: ./app/services/database
+      dockerfile: Dockerfile
+    container_name: database-build
+    restart: "no"
+    env_file:
+      - .env
+    depends_on:
+      postgres-database:
+        condition: service_healthy
+    networks:
+      - toilav-network
+  
 volumes:
-  toilav-database-volume:
+  postgres-database-volume:
   pgadmin-volume:
+
+networks:
+  toilav-network:
