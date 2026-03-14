@@ -14,7 +14,7 @@ services:
       - database-engine-volume:/var/lib/postgresql
       - ./postgres-init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -34,9 +34,12 @@ services:
       - PGADMIN_DEFAULT_EMAIL=admin@admin.com
       - PGADMIN_DEFAULT_PASSWORD=password
       - PGADMIN_CONFIG_SERVER_MODE=False
-      - PGADMIN_CONFIG_SESSION_COOKIE_SAMESITE='Lax'
-      - PGADMIN_CONFIG_SESSION_COOKIE_SECURE=False
-      - PGADMIN_CONFIG_WTF_CSRF_SSL_STRICT=False
+      # - PGADMIN_CONFIG_SESSION_COOKIE_SAMESITE='Lax'
+      # - PGADMIN_CONFIG_SESSION_COOKIE_SECURE=False
+      # - PGADMIN_CONFIG_WTF_CSRF_ENABLED=False
+      # - PGADMIN_CONFIG_WTF_CSRF_SSL_STRICT=False
+      # - PGADMIN_CONFIG_WTF_CSRF_HEADERS=['X-CSRFToken','X-CSRF-Token']
+      # - PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION=False
     depends_on:
       - database-engine
     volumes:
