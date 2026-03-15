@@ -3,7 +3,7 @@ Database module for WhatsApp chatbot.
 Contains all SQLModel schemas and database configuration.
 """
 
-from .dbconfig import (
+from ..shared.dbconfig import (
     engine,
     create_db_and_tables,
     get_session,
@@ -18,7 +18,7 @@ from .schema import (
     Stocks,
 )
 
-from .chatbot_schema import (
+from ..shared.chatbot_schema import (
     # Enums
     UserStatus,
     ProductCategory,

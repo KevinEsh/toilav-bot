@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 environ["POSTGRES_HOST"] = "localhost"
 environ.setdefault("DATABASE_ENGINE", "postgresql")
 
-from chatbot_schema import UserRole, Users
-from dbconfig import engine
+from app.services.shared.chatbot_schema import UserRole, Users
+from app.services.shared.dbconfig import engine
 from sqlmodel import Session
 
 

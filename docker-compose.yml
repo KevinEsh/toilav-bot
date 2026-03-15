@@ -58,7 +58,35 @@ services:
         condition: service_healthy
     networks:
       - toilav-network
-  
+
+  api:
+    build:
+      context: ./app/services/api
+      dockerfile: Dockerfile
+    container_name: toilav-api
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      database-builder:
+        condition: service_completed_successfully
+    networks:
+      - toilav-network
+      
+  frontend:
+    build:
+      context: ./app/services/frontend
+      dockerfile: Dockerfile
+    container_name: toilav-frontend
+    restart: always
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+    networks:
+      - toilav-network
 volumes:
   database-engine-volume:
   pgadmin-volume:
