@@ -5,7 +5,7 @@ import re
 import requests
 from flask import current_app, jsonify
 
-from app.services.chatbot.openai_services import generate_response
+from app.services.chatbot.legacy.openai_services import generate_response
 
 
 def log_http_response(response):

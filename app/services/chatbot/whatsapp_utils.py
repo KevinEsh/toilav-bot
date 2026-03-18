@@ -3,16 +3,20 @@ import json
 import logging
 import re
 from collections import OrderedDict
+from datetime import datetime, timezone
 
 import httpx
+from chatbot_schema import Conversations, ConversationPhase, Customers
 from config import settings
+from database import get_session
+from sqlmodel import select
 from yalti import agent_generate_response
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Buffer por usuario: dedup O(1) + orden por timestamp via Timsort
+# Buffer per user: O(1) dedup + timestamp-ordered flush via Timsort
 # ---------------------------------------------------------------------------
 class UserMessageBuffer:
     """Buffer de mensajes por usuario con deduplicación LRU y orden por timestamp.
@@ -82,6 +86,52 @@ def _get_buffer(wa_id: str) -> UserMessageBuffer:
 
 
 # ---------------------------------------------------------------------------
+# DB helpers — sessions are opened and closed around each operation so no
+# connection is held open during the (potentially slow) LLM call.
+# ---------------------------------------------------------------------------
+def _load_conversation(wa_id: str, name: str) -> tuple[ConversationPhase, list]:
+    """Upsert Customer + Conversation, return (phase, history) as plain values.
+
+    The session is opened, committed, and closed here — not passed downstream.
+    """
+    for session in get_session():
+        customer = session.exec(
+            select(Customers).where(Customers.c_whatsapp_id == wa_id)
+        ).first()
+        if customer is None:
+            customer = Customers(c_whatsapp_id=wa_id, c_phone=wa_id, c_name=name)
+            session.add(customer)
+        elif customer.c_name != name:
+            customer.c_name = name
+
+        conv = session.exec(
+            select(Conversations).where(Conversations.cv_wa_id == wa_id)
+        ).first()
+        if conv is None:
+            conv = Conversations(cv_wa_id=wa_id)
+            session.add(conv)
+
+        session.commit()
+        session.refresh(conv)
+        # Copy primitive values out before the session closes
+        return conv.cv_phase, list(conv.cv_history)
+
+
+def _persist_conversation(wa_id: str, phase: ConversationPhase, history: list) -> None:
+    """Persist the updated phase and history back to the DB after the LLM call."""
+    for session in get_session():
+        conv = session.exec(
+            select(Conversations).where(Conversations.cv_wa_id == wa_id)
+        ).first()
+        if conv is None:
+            return
+        conv.cv_phase = phase
+        conv.cv_history = history
+        conv.cv_updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+
+# ---------------------------------------------------------------------------
 # Extracción de texto según tipo de mensaje
 # ---------------------------------------------------------------------------
 _UNSUPPORTED_TYPE_RESPONSE = {
@@ -105,14 +155,12 @@ def _extract_message_text(message: dict) -> str | None:
         return message["text"]["body"]
 
     # Imagen/video/documento con caption → usar el caption como texto
-    # TODO: evaluar si esto puede causar problemas (ej. caption vacío, o mensaje que no es realmente una consulta)
     if msg_type in ("image", "video", "document"):
         caption = message.get(msg_type, {}).get("caption")
         if caption:
             return caption
 
     # Interactive (botones, listas) → extraer el texto seleccionado
-    # Esto es importante para que las respuestas a botones/listas también pasen por el LLM y mantengan contexto, en lugar de responder con un mensaje fijo.
     if msg_type == "interactive":
         interactive = message.get("interactive", {})
         reply = interactive.get("button_reply") or interactive.get("list_reply")
@@ -127,6 +175,9 @@ def _extract_message_text(message: dict) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# WhatsApp API helpers
+# ---------------------------------------------------------------------------
 def log_http_response(response: httpx.Response):
     logging.info(f"Status: {response.status_code}")
     logging.info(f"Content-type: {response.headers.get('content-type')}")
@@ -134,6 +185,7 @@ def log_http_response(response: httpx.Response):
 
 
 def encapsulate_text_message(recipient: str, text: str) -> str:
+    """Construye el payload JSON para un mensaje de texto saliente."""
     return json.dumps(
         {
             "messaging_product": "whatsapp",
@@ -146,6 +198,7 @@ def encapsulate_text_message(recipient: str, text: str) -> str:
 
 
 async def send_message(data: str):
+    """Envía un mensaje al API de WhatsApp Cloud."""
     headers = {
         "Content-type": "application/json",
         "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
@@ -169,6 +222,7 @@ async def send_message(data: str):
 
 
 def parse_text_for_whatsapp(text: str) -> str:
+    """Adapta el texto generado por el LLM al formato de WhatsApp."""
     # Remove brackets
     text = re.sub(r"\【.*?\】", "", text).strip()
     # Convert double asterisks to single asterisks (WhatsApp bold)
@@ -176,46 +230,87 @@ def parse_text_for_whatsapp(text: str) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# Owner command handler (stub — expanded in later phases)
+# ---------------------------------------------------------------------------
+async def handle_owner_command(text: str):
+    """Despacha los comandos slash del dueño de la tienda.
+
+    Mensajes sin '/' se ignoran mientras no haya un HUMAN_TAKEOVER activo.
+    Los handlers por fase se conectan aquí en iteraciones posteriores.
+    """
+    if not text.startswith("/"):
+        logger.info("Owner sent free-text (no active takeover): %r", text)
+        return
+    command, _, args = text[1:].partition(" ")
+    command = command.lower().strip()
+    logger.info("Owner command: /%s args=%r", command, args)
+    # TODO: dispatch to per-phase command handlers in later phases
+
+
+# ---------------------------------------------------------------------------
+# Customer message processing
+# ---------------------------------------------------------------------------
 async def process_whatsapp_message(body: dict):
+    """Punto de entrada principal para mensajes entrantes de WhatsApp.
+
+    Flujo:
+    1. Detecta si el mensaje viene del dueño → despacha handle_owner_command.
+    2. Si es un cliente → dedup + debounce.
+    3. Carga (phase, history) de la DB — sesión cerrada antes del LLM call.
+    4. LLM call sin conexión a DB abierta.
+    5. Persiste (phase, history) actualizado — nueva sesión corta.
+    """
     wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
     name = body["entry"][0]["changes"][0]["value"]["contacts"][0]["profile"]["name"]
 
     message = body["entry"][0]["changes"][0]["value"]["messages"][0]
-    message_type = message.get("type", "")
     message_id = message.get("id", "")
     timestamp = int(message.get("timestamp", 0))
 
-    # Si es un tipo no soportado, ignorar silenciosamente
-    if message_type in _UNSUPPORTED_TYPE_RESPONSE:
+    # ── Owner routing ────────────────────────────────────────────────────────
+    if wa_id == settings.OWNER_WA_ID:
+        text = _extract_message_text(message)
+        if text:
+            await handle_owner_command(text)
         return
 
+    # ── Customer flow ────────────────────────────────────────────────────────
     buf = _get_buffer(wa_id)
     buf.name = name
 
-    # 1. Deduplicación: ignorar mensajes ya procesados
     if buf.is_duplicate(message_id):
         logger.info("Duplicate message %s from %s, skipping", message_id, wa_id)
         return
 
-    # 2. Extraer texto según tipo de mensaje
     message_text = _extract_message_text(message)
-
     if message_text is None:
         return
 
-    # 3. Acumular mensaje y esperar debounce
     buf.add_message(timestamp, message_text)
     await buf.wait_for_more_messages()
 
-    # 4. Procesar mensajes acumulados
     combined_messages = buf.flush()
     logger.info("Processing buffered messages from %s: %s", wa_id, combined_messages)
 
     try:
-        agent_response = await agent_generate_response(combined_messages, wa_id, buf.name)
-        agent_response = parse_text_for_whatsapp(agent_response)
+        # 1. Load state — session opens and closes here
+        phase, history = _load_conversation(wa_id, name)
 
-        data = encapsulate_text_message(wa_id, agent_response)
+        # 2. LLM call — no DB connection held during this await
+        response_text, new_phase, new_history = await agent_generate_response(
+            message=combined_messages,
+            wa_id=wa_id,
+            name=name,
+            phase=phase,
+            history=history,
+        )
+
+        # 3. Persist updated state — new short session
+        _persist_conversation(wa_id, new_phase, new_history)
+
+        response_text = parse_text_for_whatsapp(response_text)
+        data = encapsulate_text_message(wa_id, response_text)
         await send_message(data)
     except Exception:
         logger.exception("Failed to process messages from %s", wa_id)

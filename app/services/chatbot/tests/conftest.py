@@ -8,13 +8,13 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Set required env vars BEFORE any chatbot module gets imported
-os.environ.setdefault("ACCESS_TOKEN", "test-access-token")
+os.environ.setdefault("WHATSAPP_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("APP_ID", "test-app-id")
 os.environ.setdefault("APP_SECRET", "test-app-secret")
-os.environ.setdefault("RECIPIENT_WAID", "5215512345678")
-os.environ.setdefault("VERSION", "v18.0")
+os.environ.setdefault("WHATSAPP_API_VERSION", "v18.0")
 os.environ.setdefault("PHONE_NUMBER_ID", "123456789")
 os.environ.setdefault("VERIFY_TOKEN", "test-verify-token")
+os.environ.setdefault("OWNER_WA_ID", "5215512345678")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-fake-key")
 
 

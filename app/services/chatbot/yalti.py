@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from chatbot_schema import ConversationPhase
 from pydantic_ai import Agent, RunContext
-from rules import SYSTEM_PROMPT
+from rules import build_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -14,20 +15,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 @dataclass
 class ChatDeps:
-    """Dependencias del agente: identificadores del cliente y su nombre."""
+    """Dependencias del agente: identificadores del cliente y fase actual."""
 
     wa_id: str
     customer_name: str
-
-
-# ---------------------------------------------------------------------------
-# Almacén en memoria del historial de conversación por wa_id
-# ---------------------------------------------------------------------------
-_conversation_store: dict[str, list] = {}
-
-
-def _get_history(wa_id: str) -> list:
-    return _conversation_store.setdefault(wa_id, [])
+    phase: ConversationPhase
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +28,6 @@ def _get_history(wa_id: str) -> list:
 agent = Agent(
     model="openai:gpt-4o-mini",
     name="yalti-assistant",
-    system_prompt=SYSTEM_PROMPT,
     deps_type=ChatDeps,
 )
 
@@ -67,23 +58,50 @@ async def consultar_informacion(
 # ---------------------------------------------------------------------------
 # Función pública que consume el resto de la app
 # ---------------------------------------------------------------------------
-async def agent_generate_response(message_body: str, wa_id: str, name: str) -> str:
+async def agent_generate_response(
+    message: str,
+    wa_id: str,
+    name: str,
+    phase: ConversationPhase,
+    history: list,
+) -> tuple[str, ConversationPhase, list]:
     """Genera una respuesta del chatbot para un mensaje de WhatsApp entrante.
 
-    Mantiene el historial de conversación por ``wa_id`` para dar continuidad
-    al diálogo.
+    Recibe el historial y la fase como valores planos (sin sesión de DB abierta).
+    Devuelve una tupla (response_text, new_phase, new_history) para que el
+    llamador pueda persistir los cambios en una sesión separada y breve.
+
+    La fase sólo cambia cuando el código detecta una condición de transición
+    (nunca por decisión directa del LLM).
+
+    Args:
+        message: Texto del mensaje del cliente (posiblemente combinado tras debounce).
+        wa_id: WhatsApp ID del cliente.
+        name: Nombre del cliente.
+        phase: Fase actual de la conversación según la DB.
+        history: Historial serializado de mensajes pydantic-ai.
+
+    Returns:
+        Tupla (texto_de_respuesta, fase_nueva, historial_nuevo).
     """
-    deps = ChatDeps(wa_id=wa_id, customer_name=name)
-    history = _get_history(wa_id)
-    print(history)
+    deps = ChatDeps(wa_id=wa_id, customer_name=name, phase=phase)
+    system_prompt = build_system_prompt(phase=phase, customer_name=name)
 
     result = await agent.run(
-        message_body,
+        message,
         deps=deps,
         message_history=history,
+        system_prompt=system_prompt,
     )
 
-    # Actualizar historial con los mensajes nuevos
-    history.extend(result.new_messages())
+    new_history = history + list(result.new_messages())
 
-    return result.output
+    # ── Phase transition logic ───────────────────────────────────────────────
+    # The LLM never decides phase changes directly.  Transitions are triggered
+    # here by code inspecting the result or structured output.
+    # For now: GREETING transitions to QA_LOOP after the first bot response.
+    new_phase = phase
+    if phase == ConversationPhase.GREETING:
+        new_phase = ConversationPhase.QA_LOOP
+
+    return result.output, new_phase, new_history
