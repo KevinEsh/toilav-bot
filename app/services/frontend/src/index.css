@@ -6,76 +6,64 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.809 0.105 251.813);
-    --chart-2: oklch(0.623 0.214 259.815);
-    --chart-3: oklch(0.546 0.245 262.881);
-    --chart-4: oklch(0.488 0.243 264.376);
-    --chart-5: oklch(0.424 0.199 265.638);
-    --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    /* Base — warm off-white */
+    --background: hsl(0 0% 98%);
+    --foreground: hsl(20 15% 15%);
+
+    /* Card & surfaces */
+    --card: hsl(0 0% 100%);
+    --card-foreground: hsl(20 15% 15%);
+    --popover: hsl(0 0% 100%);
+    --popover-foreground: hsl(20 15% 15%);
+
+    /* Primary — walnut gold */
+    --primary: hsl(28 80% 52%);
+    --primary-foreground: hsl(0 0% 100%);
+
+    /* Secondary — soft sage */
+    --secondary: hsl(140 15% 94%);
+    --secondary-foreground: hsl(140 10% 30%);
+
+    /* Muted */
+    --muted: hsl(30 10% 96%);
+    --muted-foreground: hsl(20 5% 45%);
+
+    /* Accent — warm highlight */
+    --accent: hsl(30 15% 93%);
+    --accent-foreground: hsl(20 15% 15%);
+
+    /* Destructive */
+    --destructive: hsl(0 72% 51%);
+
+    /* Borders & inputs */
+    --border: hsl(30 10% 90%);
+    --input: hsl(30 10% 90%);
+    --ring: hsl(28 80% 52%);
+
+    /* Charts */
+    --chart-1: hsl(28 80% 52%);
+    --chart-2: hsl(140 15% 50%);
+    --chart-3: hsl(20 15% 40%);
+    --chart-4: hsl(30 40% 65%);
+    --chart-5: hsl(140 10% 70%);
+
+    --radius: 0.5rem;
+
+    /* Sidebar — warm charcoal */
+    --sidebar: hsl(20 15% 12%);
+    --sidebar-foreground: hsl(30 10% 85%);
+    --sidebar-primary: hsl(28 80% 52%);
+    --sidebar-primary-foreground: hsl(0 0% 100%);
+    --sidebar-accent: hsl(28 80% 52%);
+    --sidebar-accent-foreground: hsl(0 0% 100%);
+    --sidebar-border: hsl(20 10% 20%);
+    --sidebar-ring: hsl(28 80% 52%);
 }
 
-.dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.809 0.105 251.813);
-    --chart-2: oklch(0.623 0.214 259.815);
-    --chart-3: oklch(0.546 0.245 262.881);
-    --chart-4: oklch(0.488 0.243 264.376);
-    --chart-5: oklch(0.424 0.199 265.638);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
-}
 
 @theme inline {
-    --font-sans: 'Geist Variable', sans-serif;
+    --font-sans: 'DM Sans', sans-serif;
+    --font-heading: 'Plus Jakarta Sans', sans-serif;
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
