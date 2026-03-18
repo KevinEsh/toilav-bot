@@ -75,6 +75,24 @@ services:
     networks:
       - toilav-network
       
+  chatbot:
+    build:
+      context: ./app/services/chatbot
+      dockerfile: Dockerfile
+    container_name: toilav-chatbot
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./app/services/database:/schema:ro
+    depends_on:
+      database-builder:
+        condition: service_completed_successfully
+    networks:
+      - toilav-network
+
   frontend:
     build:
       context: ./app/services/frontend
