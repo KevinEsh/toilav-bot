@@ -260,7 +260,7 @@ class Products(SQLModel, table=True):
         p_currency (str): Currency code (USD, EUR, etc.).
         p_quantity (int):
         p_unit (ProductUnit): Unit of measure (kg, piece, liter).
-        p_image_uuid (Optional[str]): UUID for product image. Stored separately in an object storage service.
+        p_image_url (Optional[str]): Public URL of the product image stored in MinIO.
         p_properties (Optional[dict]): JSON object for custom properties such as color, size, material, etc.
         p_is_available (bool): Whether product is available for sale. If false, hidden from customers.
         p_created_at (datetime): Creation timestamp.
@@ -274,7 +274,7 @@ class Products(SQLModel, table=True):
     p_currency: str = Field(default="MXN", max_length=3)
     p_net_content: float = Field(default=1.0, ge=0.0)
     p_unit: ProductUnit = Field(default=ProductUnit.UNIT)
-    p_image_uuid: Optional[str] = Field(default=None)
+    p_image_url: Optional[str] = Field(default=None)
     p_properties: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     p_rag_text: Optional[str] = Field(default=None, sa_column=Column(Text))
     p_is_available: bool = Field(default=True)
