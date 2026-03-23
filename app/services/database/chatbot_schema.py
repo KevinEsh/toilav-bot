@@ -77,30 +77,30 @@ class ProductUnit(str, Enum):
 
 
 class OrderStatus(str, Enum):
-    CONSUMER_REVIEWING        = "consumer_reviewing"         # Phase 3: customer building order
-    PENDING_STORE_APPROVAL    = "pending_store_approval"     # Phase 5: awaiting owner /approve
-    APPROVED_PENDING_PAYMENT  = "approved_pending_payment"   # Phase 6: awaiting payment
-    PENDING_DELIVERY          = "pending_delivery"           # Phase 7: payment confirmed
-    DELIVERY_IN_COURSE        = "delivery_in_course"         # Phase 8: out for delivery
-    COMPLETED                 = "completed"                  # Phase 9: delivered
-    CANCELLED                 = "cancelled"                  # rejected or abandoned
+    CONSUMER_REVIEWING = "consumer_reviewing"  # Phase 3: customer building order
+    PENDING_STORE_APPROVAL = "pending_store_approval"  # Phase 5: awaiting owner /approve
+    APPROVED_PENDING_PAYMENT = "approved_pending_payment"  # Phase 6: awaiting payment
+    PENDING_DELIVERY = "pending_delivery"  # Phase 7: payment confirmed
+    DELIVERY_IN_COURSE = "delivery_in_course"  # Phase 8: out for delivery
+    COMPLETED = "completed"  # Phase 9: delivered
+    CANCELLED = "cancelled"  # rejected or abandoned
 
 
 class ConversationPhase(str, Enum):
-    GREETING            = "greeting"
-    QA_LOOP             = "qa_loop"
-    ORDER_BUILDING      = "order_building"
-    COLLECTING_DETAILS  = "collecting_details"
-    PENDING_APPROVAL    = "pending_approval"
-    PENDING_PAYMENT     = "pending_payment"
-    PENDING_DELIVERY    = "pending_delivery"
-    DELIVERY_IN_COURSE  = "delivery_in_course"
-    COMPLETED           = "completed"
+    GREETING = "greeting"
+    QA_LOOP = "qa_loop"
+    ORDER_BUILDING = "order_building"
+    COLLECTING_DETAILS = "collecting_details"
+    PENDING_APPROVAL = "pending_approval"
+    PENDING_PAYMENT = "pending_payment"
+    PENDING_DELIVERY = "pending_delivery"
+    DELIVERY_IN_COURSE = "delivery_in_course"
+    COMPLETED = "completed"
 
 
 class ConversationMode(str, Enum):
-    BOT             = "bot"
-    HUMAN_TAKEOVER  = "human_takeover"
+    BOT = "bot"
+    HUMAN_TAKEOVER = "human_takeover"
 
 
 class CancelReason(str, Enum):
@@ -405,11 +405,15 @@ class Orders(SQLModel, table=True):
     # o_code: str = Field(unique=True, max_length=30, index=True)
     o_c_id: int = Field(foreign_key="customers.c_id", index=True)
     o_s_id: int = Field(foreign_key="stores.s_id", index=True)
-    o_status: OrderStatus = Field(default=OrderStatus.PENDING)
+    o_status: OrderStatus = Field(default=OrderStatus.CONSUMER_REVIEWING)
     # Amounts
     o_subtotal: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
-    o_discount_amount: Optional[float] = Field(default=None, ge=0.0, sa_column=Column(Numeric(10, 2)))
-    o_shipping_amount: Optional[float] = Field(default=None, ge=0.0, sa_column=Column(Numeric(10, 2)))
+    o_discount_amount: Optional[float] = Field(
+        default=None, ge=0.0, sa_column=Column(Numeric(10, 2))
+    )
+    o_shipping_amount: Optional[float] = Field(
+        default=None, ge=0.0, sa_column=Column(Numeric(10, 2))
+    )
     o_total: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
     o_currency: str = Field(default="MXN", max_length=3)
     # Payment
@@ -450,7 +454,9 @@ class OrderItems(SQLModel, table=True):
     oi_p_id: int = Field(foreign_key="products.p_id")
     oi_units: int = Field(ge=1)
     oi_unit_price: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
-    oi_discount_amount: Optional[float] = Field(default=None, ge=0.0, sa_column=Column(Numeric(10, 2)))
+    oi_discount_amount: Optional[float] = Field(
+        default=None, ge=0.0, sa_column=Column(Numeric(10, 2))
+    )
     oi_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     oi_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -469,7 +475,7 @@ class OrderStatusHistory(SQLModel, table=True):
 
     osh_id: int = id_field("orderstatushistory")
     osh_o_id: int = Field(foreign_key="orders.o_id", index=True)
-    osh_status: OrderStatus = Field(default=OrderStatus.PENDING)
+    osh_status: OrderStatus = Field(default=OrderStatus.CONSUMER_REVIEWING)
     osh_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     osh_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -477,6 +483,7 @@ class OrderStatusHistory(SQLModel, table=True):
 # ============================================================================
 # CONVERSATION & MESSAGE MODELS
 # ============================================================================
+
 
 class Conversations(SQLModel, table=True):
     """
