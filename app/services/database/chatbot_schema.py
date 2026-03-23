@@ -77,15 +77,30 @@ class ProductUnit(str, Enum):
 
 
 class OrderStatus(str, Enum):
-    PENDING = "pending"
-    CONFIRMED = "confirmed"
-    PROCESSING = "processing"
-    SHIPPED = "shipped"
-    OUT_FOR_DELIVERY = "out_for_delivery"
-    DELIVERED = "delivered"
-    CANCELLED = "cancelled"
-    REFUNDED = "refunded"
-    FAILED = "failed"
+    CONSUMER_REVIEWING = "consumer_reviewing"  # Phase 3: customer building order
+    PENDING_STORE_APPROVAL = "pending_store_approval"  # Phase 5: awaiting owner /approve
+    APPROVED_PENDING_PAYMENT = "approved_pending_payment"  # Phase 6: awaiting payment
+    PENDING_DELIVERY = "pending_delivery"  # Phase 7: payment confirmed
+    DELIVERY_IN_COURSE = "delivery_in_course"  # Phase 8: out for delivery
+    COMPLETED = "completed"  # Phase 9: delivered
+    CANCELLED = "cancelled"  # rejected or abandoned
+
+
+class ConversationPhase(str, Enum):
+    GREETING = "greeting"
+    QA_LOOP = "qa_loop"
+    ORDER_BUILDING = "order_building"
+    COLLECTING_DETAILS = "collecting_details"
+    PENDING_APPROVAL = "pending_approval"
+    PENDING_PAYMENT = "pending_payment"
+    PENDING_DELIVERY = "pending_delivery"
+    DELIVERY_IN_COURSE = "delivery_in_course"
+    COMPLETED = "completed"
+
+
+class ConversationMode(str, Enum):
+    BOT = "bot"
+    HUMAN_TAKEOVER = "human_takeover"
 
 
 class CancelReason(str, Enum):
@@ -390,11 +405,15 @@ class Orders(SQLModel, table=True):
     # o_code: str = Field(unique=True, max_length=30, index=True)
     o_c_id: int = Field(foreign_key="customers.c_id", index=True)
     o_s_id: int = Field(foreign_key="stores.s_id", index=True)
-    o_status: OrderStatus = Field(default=OrderStatus.PENDING)
+    o_status: OrderStatus = Field(default=OrderStatus.CONSUMER_REVIEWING)
     # Amounts
     o_subtotal: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
-    o_discount_amount: Optional[float] = Field(default=None, ge=0.0, sa_column=Column(Numeric(10, 2)))
-    o_shipping_amount: Optional[float] = Field(default=None, ge=0.0, sa_column=Column(Numeric(10, 2)))
+    o_discount_amount: Optional[float] = Field(
+        default=None, ge=0.0, sa_column=Column(Numeric(10, 2))
+    )
+    o_shipping_amount: Optional[float] = Field(
+        default=None, ge=0.0, sa_column=Column(Numeric(10, 2))
+    )
     o_total: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
     o_currency: str = Field(default="MXN", max_length=3)
     # Payment
@@ -435,7 +454,9 @@ class OrderItems(SQLModel, table=True):
     oi_p_id: int = Field(foreign_key="products.p_id")
     oi_units: int = Field(ge=1)
     oi_unit_price: float = Field(default=0.0, ge=0.0, sa_column=Column(Numeric(10, 2)))
-    oi_discount_amount: Optional[float] = Field(default=None, ge=0.0, sa_column=Column(Numeric(10, 2)))
+    oi_discount_amount: Optional[float] = Field(
+        default=None, ge=0.0, sa_column=Column(Numeric(10, 2))
+    )
     oi_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     oi_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -454,7 +475,7 @@ class OrderStatusHistory(SQLModel, table=True):
 
     osh_id: int = id_field("orderstatushistory")
     osh_o_id: int = Field(foreign_key="orders.o_id", index=True)
-    osh_status: OrderStatus = Field(default=OrderStatus.PENDING)
+    osh_status: OrderStatus = Field(default=OrderStatus.CONSUMER_REVIEWING)
     osh_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     osh_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -463,40 +484,32 @@ class OrderStatusHistory(SQLModel, table=True):
 # CONVERSATION & MESSAGE MODELS
 # ============================================================================
 
-# TODO: internal note: interesting use but to much for MVP, we can add it later if we have time and resources to implement it properly. It would be a great way to maintain context in the chatbot conversations and provide a more personalized experience. We can track the conversation flow, user intent, and relevant information extracted from messages to enhance the bot's responses and make interactions more seamless for customers. For now, we can focus on getting the core messaging functionality working and then consider adding this conversation tracking feature in a future iteration.
-# class Conversations(SQLModel, table=True):
-#     """
-#     WhatsApp conversation sessions.
-#     Tracks conversation context and state.
 
-#     Example in the application: A customer initiates a conversation about an order. We create a Conversations entry with conv_u_id referencing the user, conv_status=ACTIVE, and conv_intent="order_inquiry". As the conversation progresses, we update conv_context with relevant information (e.g., order ID being discussed) and track timestamps. If the customer asks about a product, we might set conv_intent="product_inquiry" and store the product ID in conv_context. This allows us to maintain state across multiple messages and provide a more personalized experience.
-#     A way to implement it using the chatbot powered by RAG could be: When a new message comes in, we check if there's an active conversation for that user. If not, we create a new Conversations entry. We then analyze the message to determine the user's intent (e.g., asking about an order, product, or requesting support) and update conv_intent accordingly. We can also store any relevant information extracted from the message (like order ID or product name) in conv_context as a JSON object. This way, when the next message comes in, we can refer back to conv_context to understand the context of the conversation and provide accurate responses. For example, if the user asks "Where is my order #123?", we set conv_intent="order_inquiry" and store {"order_id": 123} in conv_context. When they follow up with "Has it shipped?", we can check conv_context for the order_id and provide the current status of that specific order without needing them to repeat the information.
+class Conversations(SQLModel, table=True):
+    """
+    Active WhatsApp conversation sessions.
 
-#     Args:
-#         conv_id (Optional[int]): Conversation ID, auto-incremented.
-#         conv_u_id (int): Foreign key to user.
-#         conv_status (ConversationStatus): Conversation status.
-#         conv_intent (Optional[str]): Detected user intent.
-#         conv_context (Optional[dict]): JSON state for conversation flow.
-#         conv_started_at (datetime): When conversation started.
-#         conv_ended_at (Optional[datetime]): When conversation ended.
-#         conv_last_message_at (Optional[datetime]): Last message timestamp.
-#         conv_message_count (int): Total messages in conversation.
-#         conv_escalated_to (Optional[str]): Agent ID if escalated.
-#         conv_escalated_at (Optional[datetime]): Escalation timestamp.
-#     """
+    One record per customer (upserted on each contact). Tracks the current
+    phase in the state machine, the bot/human mode, and the full pydantic-ai
+    message history so conversation context survives restarts.
 
-#     conv_id: int = id_field("conversations")
-#     conv_u_id: int = Field(foreign_key="users.u_id", index=True)
-#     conv_status: ConversationStatus = Field(default=ConversationStatus.ACTIVE)
-#     conv_intent: Optional[str] = Field(default=None, max_length=50)
-#     conv_context: Optional[dict] = Field(default=None, sa_column=Column(JSON))
-#     conv_started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-#     conv_ended_at: Optional[datetime] = Field(default=None)
-#     conv_last_message_at: Optional[datetime] = Field(default=None)
-#     conv_message_count: int = Field(default=0)
-#     conv_escalated_to: Optional[str] = Field(default=None, max_length=100)
-#     conv_escalated_at: Optional[datetime] = Field(default=None)
+    Args:
+        cv_id (int): Conversation ID, auto-incremented.
+        cv_wa_id (str): WhatsApp ID of the customer (indexed, unique).
+        cv_phase (ConversationPhase): Current phase in the state machine.
+        cv_mode (ConversationMode): BOT or HUMAN_TAKEOVER.
+        cv_history (list): Serialised pydantic-ai ModelMessage history (JSON).
+        cv_started_at (datetime): When the conversation was first created.
+        cv_updated_at (datetime): Last activity timestamp.
+    """
+
+    cv_id: int = id_field("conversations")
+    cv_wa_id: str = Field(unique=True, index=True, max_length=50)
+    cv_phase: ConversationPhase = Field(default=ConversationPhase.GREETING)
+    cv_mode: ConversationMode = Field(default=ConversationMode.BOT)
+    cv_history: list = Field(default_factory=list, sa_column=Column(JSON))
+    cv_started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    cv_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Messages(SQLModel, table=True):
@@ -918,22 +931,11 @@ CHATBOT_MODELS = [
     Orders,
     OrderItems,
     OrderStatusHistory,
+    # Conversations
+    Conversations,
     # Messages
     Messages,
     MessageTemplates,
-    # Feedback
-    # BotFeedback,
-    # # FAQ
+    # FAQ
     FAQItems,
-    # # Notifications
-    # Notifications,
-    # # Settings
-    # StoreSettings,
-    # BusinessHours,
-    # # Delivery
-    # DeliveryZones,
-    # Deliveries,
-    # # Analytics
-    # BotAnalytics,
-    # AuditLog,
 ]

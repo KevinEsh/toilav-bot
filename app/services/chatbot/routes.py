@@ -1,10 +1,11 @@
 import asyncio
 import logging
 
+import database  # noqa: F401 — must be imported first to add chatbot_schema to sys.path
 from config import settings
-from decorators.security import verify_signature
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from security import verify_signature
 from whatsapp_utils import (
     is_valid_whatsapp_message,
     process_whatsapp_message,
@@ -45,7 +46,7 @@ async def webhook_get(
         return JSONResponse({"status": "error", "message": "Missing parameters"}, status_code=400)
 
 
-@router.post("/webhook", dependencies=[Depends(verify_signature)])
+@router.post("/webhook", dependencies=[Depends(verify_signature)], response_model=None)
 async def webhook_post(request: Request) -> dict[str, str] | JSONResponse:
     """Handle incoming webhook events from the WhatsApp API.
 
@@ -62,6 +63,7 @@ async def webhook_post(request: Request) -> dict[str, str] | JSONResponse:
     if is_valid_whatsapp_message(body):
         task = asyncio.create_task(process_whatsapp_message(body))
         task.add_done_callback(_log_task_exception)
+        # process_whatsapp_message(body)
         return {"status": "ok"}
     else:
         return JSONResponse(
