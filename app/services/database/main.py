@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 
 import boto3
 from botocore.config import Config
@@ -9,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlmodel import Session, select
 from dbconfig import get_session, create_db_and_tables
-from chatbot_schema import Products
+from chatbot_schema import Products, CHATBOT_MODELS  # noqa: F401 — registers all tables in SQLModel.metadata
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
@@ -33,7 +34,13 @@ def get_s3():
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "products")
 MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000")
 
-app = FastAPI(title="Toilav Bot API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    create_db_and_tables()
+    yield
+
+
+app = FastAPI(title="Toilav Bot API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,7 +61,6 @@ class ProductCreate(BaseModel):
     p_unit: str = "unit"
     p_image_url: Optional[str] = None
     p_properties: Optional[dict] = None
-    p_rag_text: Optional[str] = None
     p_is_available: bool = True
 
 
@@ -67,8 +73,17 @@ class ProductUpdate(BaseModel):
     p_unit: Optional[str] = None
     p_image_url: Optional[str] = None
     p_properties: Optional[dict] = None
-    p_rag_text: Optional[str] = None
     p_is_available: Optional[bool] = None
+
+
+def _compute_rag_text(product: Products) -> str:
+    description = product.p_description or ""
+    unit = product.p_unit.value if hasattr(product.p_unit, "value") else product.p_unit
+    return (
+        f"• [p_id={product.p_id}] {product.p_name} | "
+        f"${product.p_sale_price} {product.p_currency} | "
+        f"{product.p_net_content} {unit} | {description}"
+    )
 
 
 # ---- ENDPOINTS ----
@@ -98,6 +113,10 @@ def create_product(data: ProductCreate, session: Session = Depends(get_session))
     session.add(product)
     session.commit()
     session.refresh(product)
+    product.p_rag_text = _compute_rag_text(product)
+    session.add(product)
+    session.commit()
+    session.refresh(product)
     return product
 
 
@@ -109,6 +128,7 @@ def update_product(product_id: int, data: ProductUpdate, session: Session = Depe
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(product, key, value)
+    product.p_rag_text = _compute_rag_text(product)
     product.p_updated_at = datetime.now(timezone.utc)
     session.add(product)
     session.commit()

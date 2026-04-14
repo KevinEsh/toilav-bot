@@ -45,20 +45,6 @@ services:
     volumes:
       - pgadmin-volume:/var/lib/pgadmin/
 
-  database-builder:
-    build:
-      context: ./app/services/database
-      dockerfile: Dockerfile
-    container_name: database-builder
-    restart: "no"
-    env_file:
-      - .env
-    depends_on:
-      database-engine:
-        condition: service_healthy
-    networks:
-      - toilav-network
-
   minio:
     image: minio/minio:latest
     container_name: minio
@@ -98,7 +84,7 @@ services:
 
   api:
     build:
-      context: ./app/services/api
+      context: ./app/services/database
       dockerfile: Dockerfile
     container_name: toilav-api
     restart: always
@@ -113,8 +99,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      database-builder:
-        condition: service_completed_successfully
+      database-engine:
+        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     networks:

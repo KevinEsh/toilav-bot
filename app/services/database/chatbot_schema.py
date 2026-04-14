@@ -530,15 +530,14 @@ class Messages(SQLModel, table=True):
     """
 
     m_id: int = id_field("messages")
-    # m_conv_id: int = Field(foreign_key="conversations.conv_id", index=True)
+    m_conv_id: Optional[int] = Field(default=None, foreign_key="conversations.cv_id", index=True)
     m_c_id: int = Field(foreign_key="customers.c_id", index=True)
+    m_wa_id: Optional[str] = Field(default=None, max_length=100, index=True)  # WhatsApp-assigned message ID (wamid.xxx)
     m_direction: MessageDirection
     m_type: MessageType = Field(default=MessageType.TEXT)
     m_content: Optional[str] = Field(default=None, sa_column=Column(Text))
-    # m_media_mime_type: Optional[str] = Field(default=None, max_length=100)
     m_status: MessageStatus = Field(default=MessageStatus.SENT)
     m_context_message_id: Optional[str] = Field(default=None, max_length=100)
-    # m_metadata: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     m_error_code: Optional[str] = Field(default=None, max_length=50)
     m_error_message: Optional[str] = Field(default=None, max_length=500)
     m_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

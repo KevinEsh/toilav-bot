@@ -1,13 +1,15 @@
 [project]
-name = "database"
+name = "toilav-api"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "psycopg2-binary>=2.9.11",
-    "python-dotenv>=1.2.2",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
     "sqlmodel>=0.0.37",
+    "psycopg2-binary>=2.9.11",
+    "boto3>=1.34.0",
+    "python-multipart>=0.0.9",
+    "python-dotenv>=1.2.2",
 ]
 
 [dependency-groups]
