@@ -2,10 +2,24 @@ import asyncio
 import logging
 import re
 from collections import OrderedDict
+from datetime import datetime, timezone
+from time import monotonic
+from typing import Callable, Generic, TypeVar
 
 import httpx
-from chatbot_schema import ConversationPhase
+from chatbot_schema import (
+    Customers,
+    MessageDirection,
+    Messages,
+    MessageStatus,
+    MessageType,
+    Products,
+    Stores,
+)
 from config import settings
+from database import engine
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from sqlmodel import Session, select
 from yalti import StoreInfo, agent_generate_response
 
 logger = logging.getLogger(__name__)
@@ -109,38 +123,138 @@ def _get_userbuffer(wa_id: str) -> UserMessageBuffer:
 
 
 # ---------------------------------------------------------------------------
+# Generic TTL cache — reloads from DB at most once per `ttl` seconds.
+# Keeps store info and product catalog in memory so we don't hit the DB on
+# every incoming message. Both change infrequently (owner-driven updates).
+# ---------------------------------------------------------------------------
+_T = TypeVar("_T")
+
+
+class _TTLCache(Generic[_T]):
+    def __init__(self, loader: Callable[[], _T], ttl: float = 300.0):
+        self._loader = loader
+        self._ttl = ttl
+        self._value: _T | None = None
+        self._loaded_at: float = 0.0
+
+    def get(self) -> _T:
+        if self._value is None or (monotonic() - self._loaded_at) > self._ttl:
+            self._value = self._loader()
+            self._loaded_at = monotonic()
+        return self._value
+
+    def invalidate(self) -> None:
+        """Force reload on next access (e.g., after a product update webhook)."""
+        self._value = None
+        self._loaded_at = 0.0
+
+
+# ---------------------------------------------------------------------------
 # DB helpers — sessions are opened and closed around each operation so no
 # connection is held open during the (potentially slow) LLM call.
 # ---------------------------------------------------------------------------
-def _load_store() -> StoreInfo:
-    """Lee el registro de la tienda y lo devuelve como StoreInfo.
+def _fetch_store() -> StoreInfo:
+    with Session(engine) as session:
+        store = session.exec(select(Stores)).first()
+        if store is None:
+            logger.warning("No store record found in DB, using empty StoreInfo")
+            return StoreInfo(s_id=0, name="", description="", properties={})
+        return StoreInfo(
+            s_id=store.s_id or 0,
+            name=store.s_name,
+            description=store.s_description or "",
+            properties=store.s_properties or {},
+        )
 
-    Asume una sola tienda (single-tenant). La sesión se abre y cierra aquí.
+
+def _fetch_products() -> str:
+    """Lee p_rag_text de todos los productos disponibles (pre-computado en la API)."""
+    with Session(engine) as session:
+        products = session.exec(
+            select(Products).where(Products.p_is_available == True)  # noqa: E712
+        ).all()
+        if not products:
+            return "No hay productos disponibles actualmente."
+        lines = [p.p_rag_text for p in products if p.p_rag_text]
+        return "\n".join(lines) if lines else "No hay productos disponibles actualmente."
+
+
+_store_cache: _TTLCache[StoreInfo] = _TTLCache(loader=_fetch_store, ttl=300.0)
+_products_cache: _TTLCache[str] = _TTLCache(loader=_fetch_products, ttl=300.0)
+
+
+HISTORY_WINDOW = 20  # number of past messages to load as LLM context
+
+
+def _get_or_create_customer(wa_id: str, name: str) -> Customers:
+    """Obtiene o crea el Customer por wa_id. Retorna el objeto en estado detached."""
+    with Session(engine) as session:
+        customer = session.exec(select(Customers).where(Customers.c_whatsapp_id == wa_id)).first()
+        if customer is None:
+            customer = Customers(c_phone=wa_id, c_whatsapp_id=wa_id, c_name=name)
+            session.add(customer)
+            session.commit()
+        session.refresh(customer)
+        return customer
+
+
+def _load_conversation_history(c_id: int) -> list:
+    """Carga los últimos HISTORY_WINDOW mensajes como lista de ModelRequest/ModelResponse.
+
+    Solo incluye mensajes PROCESSED (inbound) y SENT/DELIVERED/READ (outbound) para
+    no inyectar mensajes fallidos o aún en vuelo en el historial del LLM.
+    El system prompt NO está incluido — se pasa por instructions= al agente.
     """
-    # for session in get_session():
-    #     store = session.exec(select(Stores)).first()
-    #     if store is None:
-    #         return StoreInfo(name="", description="", properties={})
-    return StoreInfo(
-        name="Tremenda Nuez",
-        description="Tienda de nueces y frutos secos online desde WhatsApp. No tenemos tienda fisica, ya que nuestro objetivo es brindar a nuestros clientes la mejor experiencia de compra desde WhatsApp directamente a su puerta",
-        properties={},
-    )
+    with Session(engine) as session:
+        db_msgs = session.exec(
+            select(Messages)
+            .where(Messages.m_c_id == c_id)
+            .order_by(Messages.m_created_at.desc())
+            .limit(HISTORY_WINDOW)
+        ).all()
+        db_msgs = list(reversed(db_msgs))  # oldest first
+
+        history = []
+        for msg in db_msgs:
+            if msg.m_direction == MessageDirection.INBOUND:
+                history.append(ModelRequest(parts=[UserPromptPart(content=msg.m_content or "")]))
+            else:
+                history.append(ModelResponse(parts=[TextPart(content=msg.m_content or "")]))
+        return history
 
 
-# In-memory conversation store — dummy implementation, replace with DB
-# TODO: Replace with DB-backed persistence (Conversations table)
-_conversation_store: dict[str, tuple[ConversationPhase, list]] = {}
+def _persist_message(
+    customer: Customers,
+    direction: MessageDirection,
+    content: str,
+    msg_type: MessageType = MessageType.TEXT,
+    status: MessageStatus = MessageStatus.RECEIVED,
+) -> Messages:
+    """Persiste un único mensaje en la DB y retorna el objeto creado."""
+    with Session(engine) as session:
+        msg = Messages(
+            m_c_id=customer.c_id,
+            m_direction=direction,
+            m_type=msg_type,
+            m_content=content,
+            m_status=status,
+        )
+        session.add(msg)
+        session.commit()
+        session.refresh(msg)
+        return msg
 
 
-def _load_conversation(contact: Contact) -> tuple[ConversationPhase, list]:
-    """Returns (phase, history) for a contact. Creates a new entry if not found."""
-    return _conversation_store.get(contact.wa_id, (ConversationPhase.GREETING, []))
-
-
-def _persist_conversation(wa_id: str, phase: ConversationPhase, history: list) -> None:
-    """Saves the updated phase and history to the in-memory store."""
-    _conversation_store[wa_id] = (phase, history)
+def _update_message_status(m_id: int, status: MessageStatus) -> None:
+    """Actualiza el status de un mensaje existente."""
+    with Session(engine) as session:
+        msg = session.get(Messages, m_id)
+        if msg is None:
+            logger.warning("_update_message_status: m_id=%s not found", m_id)
+            return
+        msg.m_status = status
+        session.add(msg)
+        session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -230,13 +344,16 @@ def encapsulate_text_message(recipient: str, text: str) -> dict:
     }
 
 
-async def send_message(data: dict):
+async def send_message(data: dict, phone_number_id: str | None = None) -> httpx.Response | None:
     """Envía un mensaje al API de WhatsApp Cloud."""
     headers = {
         "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
     }
 
-    url = f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}/{settings.PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}/{phone_number_id}/messages"
+
+    print("Sending message to WhatsApp API:", data)
+    return
 
     async with httpx.AsyncClient() as client:
         try:
@@ -326,20 +443,43 @@ async def process_whatsapp_message(body: dict):
     logger.info("Processing buffered messages from %s: %s", wa_id, combined_messages)
 
     try:
-        store = _load_store()
-        phase, history = _load_conversation(incoming_message.contact)
+        store = _store_cache.get()
+        products = _products_cache.get()
+        customer = _get_or_create_customer(wa_id, name)
+        print("Customer record:", customer)
 
-        response_text, new_history = await agent_generate_response(
+        # 1. Persist inbound message immediately — available for reprocessing on crash
+        inbound_msg = _persist_message(
+            customer=customer,
+            direction=MessageDirection.INBOUND,
+            content=combined_messages,
+            status=MessageStatus.RECEIVED,
+        )
+
+        # 2. Load history — session closed before LLM call
+        history = _load_conversation_history(customer.c_id)
+
+        # 3. LLM call with no open DB connection
+        response_text = await agent_generate_response(
             message=combined_messages,
-            wa_id=wa_id,
-            name=name,
+            customer=customer,
             store=store,
+            products=products,
             history=history,
         )
 
-        _persist_conversation(wa_id, phase, new_history)
         response_text = parse_text_for_whatsapp(response_text)
-        await send_message(encapsulate_text_message(wa_id, response_text))
+
+        # 4. Persist bot response and mark inbound as processed atomically
+        _persist_message(
+            customer=customer,
+            direction=MessageDirection.OUTBOUND,
+            content=response_text,
+            status=MessageStatus.SENT,
+        )
+        _update_message_status(inbound_msg.m_id, MessageStatus.PROCESSED)
+
+        await send_message(encapsulate_text_message(wa_id, response_text), wa_id)
     except Exception:
         logger.exception("Failed to process messages from %s", wa_id)
 

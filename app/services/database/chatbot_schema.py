@@ -150,6 +150,8 @@ class MessageType(str, Enum):
 
 
 class MessageStatus(str, Enum):
+    RECEIVED = "received"  # Inbound: arrived, not yet processed
+    PROCESSED = "processed"  # Inbound: fully handled by the bot
     SENT = "sent"
     DELIVERED = "delivered"
     READ = "read"
@@ -485,31 +487,31 @@ class OrderStatusHistory(SQLModel, table=True):
 # ============================================================================
 
 
-class Conversations(SQLModel, table=True):
-    """
-    Active WhatsApp conversation sessions.
+# class Conversations(SQLModel, table=True):
+#     """
+#     Active WhatsApp conversation sessions.
 
-    One record per customer (upserted on each contact). Tracks the current
-    phase in the state machine, the bot/human mode, and the full pydantic-ai
-    message history so conversation context survives restarts.
+#     One record per customer (upserted on each contact). Tracks the current
+#     phase in the state machine, the bot/human mode, and the full pydantic-ai
+#     message history so conversation context survives restarts.
 
-    Args:
-        cv_id (int): Conversation ID, auto-incremented.
-        cv_wa_id (str): WhatsApp ID of the customer (indexed, unique).
-        cv_phase (ConversationPhase): Current phase in the state machine.
-        cv_mode (ConversationMode): BOT or HUMAN_TAKEOVER.
-        cv_history (list): Serialised pydantic-ai ModelMessage history (JSON).
-        cv_started_at (datetime): When the conversation was first created.
-        cv_updated_at (datetime): Last activity timestamp.
-    """
+#     Args:
+#         cv_id (int): Conversation ID, auto-incremented.
+#         cv_wa_id (str): WhatsApp ID of the customer (indexed, unique).
+#         cv_phase (ConversationPhase): Current phase in the state machine.
+#         cv_mode (ConversationMode): BOT or HUMAN_TAKEOVER.
+#         cv_history (list): Serialised pydantic-ai ModelMessage history (JSON).
+#         cv_started_at (datetime): When the conversation was first created.
+#         cv_updated_at (datetime): Last activity timestamp.
+#     """
 
-    cv_id: int = id_field("conversations")
-    cv_wa_id: str = Field(unique=True, index=True, max_length=50)
-    cv_phase: ConversationPhase = Field(default=ConversationPhase.GREETING)
-    cv_mode: ConversationMode = Field(default=ConversationMode.BOT)
-    cv_history: list = Field(default_factory=list, sa_column=Column(JSON))
-    cv_started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    cv_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     cv_id: int = id_field("conversations")
+#     cv_wa_id: str = Field(unique=True, index=True, max_length=50)
+#     cv_phase: ConversationPhase = Field(default=ConversationPhase.GREETING)
+#     cv_mode: ConversationMode = Field(default=ConversationMode.BOT)
+#     cv_history: list = Field(default_factory=list, sa_column=Column(JSON))
+#     cv_started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     cv_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Messages(SQLModel, table=True):
@@ -530,9 +532,11 @@ class Messages(SQLModel, table=True):
     """
 
     m_id: int = id_field("messages")
-    m_conv_id: Optional[int] = Field(default=None, foreign_key="conversations.cv_id", index=True)
+    # m_conv_id: Optional[int] = Field(default=None, foreign_key="conversations.cv_id", index=True)
     m_c_id: int = Field(foreign_key="customers.c_id", index=True)
-    m_wa_id: Optional[str] = Field(default=None, max_length=100, index=True)  # WhatsApp-assigned message ID (wamid.xxx)
+    m_wa_id: Optional[str] = Field(
+        default=None, max_length=100, index=True
+    )  # WhatsApp-assigned message ID (wamid.xxx)
     m_direction: MessageDirection
     m_type: MessageType = Field(default=MessageType.TEXT)
     m_content: Optional[str] = Field(default=None, sa_column=Column(Text))
@@ -931,7 +935,7 @@ CHATBOT_MODELS = [
     OrderItems,
     OrderStatusHistory,
     # Conversations
-    Conversations,
+    # Conversations,
     # Messages
     Messages,
     MessageTemplates,

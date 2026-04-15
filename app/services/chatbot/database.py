@@ -9,9 +9,8 @@ and is mounted into this container at /schema so we can import it without duplic
 import sys
 from pathlib import Path
 
-from sqlmodel import Session, SQLModel, create_engine
-
 from config import settings
+from sqlmodel import Session, SQLModel, create_engine
 
 # Make the shared schema importable.  In Docker the volume is mounted at /schema;
 # locally the relative path is used as a fallback.

@@ -5,7 +5,8 @@ import hmac
 
 import pytest
 from config import settings
-from decorators.security import validate_signature
+
+from app.services.chatbot.security import validate_signature
 
 
 class TestValidateSignature:
