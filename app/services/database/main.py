@@ -284,7 +284,7 @@ def create_faq(data: FAQCreate, session: Session = Depends(get_session)):
              :display_order, :is_active, 0, NOW(), NOW())
         RETURNING *
     """), {
-        "category": data.faq_category,
+        "category": data.faq_category.upper(),
         "question": data.faq_question,
         "answer": data.faq_answer,
         "keywords": json.dumps(data.faq_keywords) if data.faq_keywords else "null",
@@ -306,7 +306,7 @@ def update_faq(faq_id: int, data: FAQCreate, session: Session = Depends(get_sess
         RETURNING *
     """), {
         "faq_id": faq_id,
-        "category": data.faq_category,
+        "category": data.faq_category.upper(),
         "question": data.faq_question,
         "answer": data.faq_answer,
         "keywords": json.dumps(data.faq_keywords) if data.faq_keywords else "null",
