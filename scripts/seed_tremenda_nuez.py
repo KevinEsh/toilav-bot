@@ -1,5 +1,10 @@
 """
-Seed script: creates Tremenda Nuez products in the catalog and uploads their images.
+Seed script: ensures Tremenda Nuez products exist in the catalog and uploads their images.
+
+For each product in the list:
+  - If a product with the same p_name already exists, reuse it (no duplicate).
+  - Otherwise, create it.
+  - Then upload the image.
 
 Reads images from data/imagenes/ and hits the local API at http://localhost:8000.
 Run with: python scripts/seed_tremenda_nuez.py
@@ -124,6 +129,12 @@ PRODUCTS = [
 ]
 
 
+def fetch_existing_by_name() -> dict[str, int]:
+    r = requests.get(f"{API}/products", timeout=15)
+    r.raise_for_status()
+    return {p["p_name"]: p["p_id"] for p in r.json()}
+
+
 def create_product(prod: dict) -> dict:
     payload = {
         "p_name": prod["p_name"],
@@ -142,7 +153,7 @@ def create_product(prod: dict) -> dict:
 def upload_image(product_id: int, image_path: Path) -> dict:
     with open(image_path, "rb") as f:
         files = {"file": (image_path.name, f, "image/jpeg")}
-        r = requests.post(f"{API}/products/{product_id}/image", files=files, timeout=30)
+        r = requests.post(f"{API}/products/{product_id}/image", files=files, timeout=120)
     r.raise_for_status()
     return r.json()
 
@@ -152,17 +163,24 @@ def main() -> int:
         print(f"[ERROR] No existe {IMG_DIR}", file=sys.stderr)
         return 1
 
-    print(f"Creando {len(PRODUCTS)} productos en {API}...\n")
+    existing = fetch_existing_by_name()
+    print(f"Procesando {len(PRODUCTS)} productos en {API} ({len(existing)} ya existen)...\n")
+
     for prod in PRODUCTS:
         img = IMG_DIR / prod["filename"]
         if not img.is_file():
             print(f"  [SKIP] Falta imagen: {img.name}")
             continue
         try:
-            created = create_product(prod)
-            pid = created["p_id"]
+            if prod["p_name"] in existing:
+                pid = existing[prod["p_name"]]
+                action = "REUSE"
+            else:
+                pid = create_product(prod)["p_id"]
+                existing[prod["p_name"]] = pid
+                action = "NEW"
             upload_image(pid, img)
-            print(f"  [OK] #{pid:>3} {prod['p_name']:<40} ${prod['p_sale_price']:>7.2f} <- {img.name}")
+            print(f"  [{action:>5}] #{pid:>3} {prod['p_name']:<40} <- {img.name}")
         except requests.HTTPError as e:
             print(f"  [FAIL] {prod['p_name']}: {e.response.status_code} {e.response.text[:200]}")
         except Exception as e:
