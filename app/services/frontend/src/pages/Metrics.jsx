@@ -14,7 +14,7 @@ const STATUS_LABEL = {
   cancelled: "Cancelada", refunded: "Reembolsada", failed: "Fallida",
   PENDING: "Pendiente", CONFIRMED: "Confirmada", PROCESSING: "Procesando",
   SHIPPED: "Enviada", DELIVERED: "Entregada", CANCELLED: "Cancelada",
-  REFUNDED: "Reembolsada", FAILED: "Fallida",
+  REFUNDED: "Reembolsada", FAILED: "Fallida", CUSTOMER_REVIEWING: "En revisión"
 }
 
 const STATUS_COLOR = {
@@ -23,7 +23,7 @@ const STATUS_COLOR = {
   cancelled: "bg-red-400", refunded: "bg-orange-400", failed: "bg-muted-foreground/40",
   PENDING: "bg-amber-400", CONFIRMED: "bg-blue-400", PROCESSING: "bg-purple-400",
   SHIPPED: "bg-indigo-400", DELIVERED: "bg-green-500", CANCELLED: "bg-red-400",
-  REFUNDED: "bg-orange-400", FAILED: "bg-muted-foreground/40",
+  REFUNDED: "bg-orange-400", FAILED: "bg-muted-foreground/40", CUSTOMER_REVIEWING: "bg-yellow-400"
 }
 
 /* ── KPI Card ── */

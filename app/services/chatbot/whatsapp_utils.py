@@ -8,6 +8,7 @@ from typing import Callable, Generic, TypeVar
 
 import httpx
 from chatbot_schema import (
+    Conversations,
     Customers,
     MessageDirection,
     Messages,
@@ -18,8 +19,10 @@ from chatbot_schema import (
 )
 from config import settings
 from database import engine
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai import ModelMessagesTypeAdapter
+from pydantic_core import to_jsonable_python
 from sqlmodel import Session, select
+import yalti
 from yalti import StoreInfo, agent_generate_response
 
 logger = logging.getLogger(__name__)
@@ -153,18 +156,13 @@ class _TTLCache(Generic[_T]):
 # DB helpers — sessions are opened and closed around each operation so no
 # connection is held open during the (potentially slow) LLM call.
 # ---------------------------------------------------------------------------
-def _fetch_store() -> StoreInfo:
+def _fetch_store() -> Stores:
     with Session(engine) as session:
         store = session.exec(select(Stores)).first()
         if store is None:
             logger.warning("No store record found in DB, using empty StoreInfo")
-            return StoreInfo(s_id=0, name="", description="", properties={})
-        return StoreInfo(
-            s_id=store.s_id or 0,
-            name=store.s_name,
-            description=store.s_description or "",
-            properties=store.s_properties or {},
-        )
+            return Stores()
+        return store
 
 
 def _fetch_products() -> str:
@@ -173,17 +171,15 @@ def _fetch_products() -> str:
         products = session.exec(
             select(Products).where(Products.p_is_available == True)  # noqa: E712
         ).all()
+        yalti.PRODUCTS = {p.p_id: p for p in products}
         if not products:
             return "No hay productos disponibles actualmente."
         lines = [p.p_rag_text for p in products if p.p_rag_text]
         return "\n".join(lines) if lines else "No hay productos disponibles actualmente."
 
 
-_store_cache: _TTLCache[StoreInfo] = _TTLCache(loader=_fetch_store, ttl=300.0)
+_store_cache: _TTLCache[Stores] = _TTLCache(loader=_fetch_store, ttl=300.0)
 _products_cache: _TTLCache[str] = _TTLCache(loader=_fetch_products, ttl=300.0)
-
-
-HISTORY_WINDOW = 20  # number of past messages to load as LLM context
 
 
 def _get_or_create_customer(wa_id: str, name: str) -> Customers:
@@ -198,29 +194,94 @@ def _get_or_create_customer(wa_id: str, name: str) -> Customers:
         return customer
 
 
-def _load_conversation_history(c_id: int) -> list:
-    """Carga los últimos HISTORY_WINDOW mensajes como lista de ModelRequest/ModelResponse.
+# ---------------------------------------------------------------------------
+# Conversation history cache — LRU in-memory cache that avoids re-reading
+# + deserializing JSONB on every message for active customers.
+# ---------------------------------------------------------------------------
+class _HistoryCache:
+    """LRU cache for deserialized pydantic-ai conversation histories, keyed by c_id."""
 
-    Solo incluye mensajes PROCESSED (inbound) y SENT/DELIVERED/READ (outbound) para
-    no inyectar mensajes fallidos o aún en vuelo en el historial del LLM.
-    El system prompt NO está incluido — se pasa por instructions= al agente.
+    def __init__(self, max_entries: int = 30):
+        self._store: OrderedDict[int, list] = OrderedDict()
+        self._max = max_entries
+
+    def get(self, c_id: int) -> list | None:
+        """Returns cached history or None. Promotes to MRU on hit."""
+        if c_id in self._store:
+            self._store.move_to_end(c_id)
+            return self._store[c_id]
+        return None
+
+    def set(self, c_id: int, history: list) -> None:
+        """Stores history, evicting the oldest entry if at capacity."""
+        self._store[c_id] = history
+        self._store.move_to_end(c_id)
+        if len(self._store) > self._max:
+            self._store.popitem(last=False)
+
+    def invalidate(self, c_id: int) -> None:
+        """Removes a specific entry (e.g. on conversation reset)."""
+        self._store.pop(c_id, None)
+
+
+_history_cache = _HistoryCache()
+
+
+# ---------------------------------------------------------------------------
+# Conversation persistence — one record per customer in the conversations
+# table, with full pydantic-ai history in a JSONB column.
+# ---------------------------------------------------------------------------
+def _get_or_create_conversation(session: Session, c_id: int) -> Conversations:
+    """Loads or creates the single Conversations record for a customer.
+
+    Must be called inside an existing Session (caller manages commit).
     """
-    with Session(engine) as session:
-        db_msgs = session.exec(
-            select(Messages)
-            .where(Messages.m_c_id == c_id)
-            .order_by(Messages.m_created_at.desc())
-            .limit(HISTORY_WINDOW)
-        ).all()
-        db_msgs = list(reversed(db_msgs))  # oldest first
+    conv = session.exec(
+        select(Conversations).where(Conversations.cv_c_id == c_id)
+    ).first()
+    if conv is None:
+        conv = Conversations(cv_c_id=c_id)
+        session.add(conv)
+        session.flush()
+    return conv
 
-        history = []
-        for msg in db_msgs:
-            if msg.m_direction == MessageDirection.INBOUND:
-                history.append(ModelRequest(parts=[UserPromptPart(content=msg.m_content or "")]))
-            else:
-                history.append(ModelResponse(parts=[TextPart(content=msg.m_content or "")]))
+
+def _load_conversation_history(c_id: int) -> list:
+    """Loads the pydantic-ai message history for a customer.
+
+    1. Check in-memory cache (hot path).
+    2. Load from Conversations.cv_history (JSONB) and deserialize.
+    3. If no conversation exists yet, return empty list.
+
+    Returns a list of ModelRequest/ModelResponse ready for agent.iter().
+    """
+    cached = _history_cache.get(c_id)
+    if cached is not None:
+        return cached
+
+    with Session(engine) as session:
+        conv = session.exec(
+            select(Conversations).where(Conversations.cv_c_id == c_id)
+        ).first()
+        if conv is None or not conv.cv_history:
+            return []
+        history = ModelMessagesTypeAdapter.validate_python(conv.cv_history)
+        _history_cache.set(c_id, history)
         return history
+
+
+def _persist_conversation_history(c_id: int, history: list) -> None:
+    """Persists the full pydantic-ai message history to the conversations table."""
+    serialized = to_jsonable_python(history)
+
+    with Session(engine) as session:
+        conv = _get_or_create_conversation(session, c_id)
+        conv.cv_history = serialized
+        conv.cv_updated_at = datetime.now(timezone.utc)
+        session.add(conv)
+        session.commit()
+
+    _history_cache.set(c_id, history)
 
 
 def _persist_message(
@@ -443,12 +504,11 @@ async def process_whatsapp_message(body: dict):
     logger.info("Processing buffered messages from %s: %s", wa_id, combined_messages)
 
     try:
-        store = _store_cache.get()
-        products = _products_cache.get()
+        # 1. Load conversation history from Conversations table (cached)
         customer = _get_or_create_customer(wa_id, name)
-        print("Customer record:", customer)
+        history = _load_conversation_history(customer.c_id)
 
-        # 1. Persist inbound message immediately — available for reprocessing on crash
+        # 2. Persist inbound message immediately — available for reprocessing on crash
         inbound_msg = _persist_message(
             customer=customer,
             direction=MessageDirection.INBOUND,
@@ -456,21 +516,18 @@ async def process_whatsapp_message(body: dict):
             status=MessageStatus.RECEIVED,
         )
 
-        # 2. Load history — session closed before LLM call
-        history = _load_conversation_history(customer.c_id)
-
         # 3. LLM call with no open DB connection
-        response_text = await agent_generate_response(
+        response_text, all_messages = await agent_generate_response(
             message=combined_messages,
             customer=customer,
-            store=store,
-            products=products,
+            store=_store_cache.get(),
+            products=_products_cache.get(),
             history=history,
         )
 
         response_text = parse_text_for_whatsapp(response_text)
 
-        # 4. Persist bot response and mark inbound as processed atomically
+        # 4. Persist bot response to Messages table
         _persist_message(
             customer=customer,
             direction=MessageDirection.OUTBOUND,
@@ -478,6 +535,9 @@ async def process_whatsapp_message(body: dict):
             status=MessageStatus.SENT,
         )
         _update_message_status(inbound_msg.m_id, MessageStatus.PROCESSED)
+
+        # 5. Persist full pydantic-ai history to Conversations table (with sliding window)
+        _persist_conversation_history(customer.c_id, all_messages)
 
         await send_message(encapsulate_text_message(wa_id, response_text), wa_id)
     except Exception:

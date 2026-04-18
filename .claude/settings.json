@@ -3,7 +3,14 @@
     "allow": [
       "Bash(rtk ls:*)",
       "Bash(rtk grep:*)",
-      "Bash(uv run:*)"
+      "Bash(uv run:*)",
+      "Bash(rtk curl:*)",
+      "WebFetch(domain:ai.pydantic.dev)",
+      "WebSearch",
+      "WebFetch(domain:pydantic.dev)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(rtk gh *)"
     ]
   }
 }

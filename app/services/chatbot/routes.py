@@ -55,18 +55,18 @@ async def webhook_post(request: Request) -> dict[str, str] | JSONResponse:
     """
     body = await request.json()
 
+    if not is_valid_whatsapp_message(body):
+        return JSONResponse(
+            {"status": "error", "message": "Not a WhatsApp API event"},
+            status_code=404,
+        )
+
     # Check if it's a WhatsApp status update
     if body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("statuses"):
         logging.info("Received a WhatsApp status update.")
         return {"status": "ok"}
 
-    if is_valid_whatsapp_message(body):
-        task = asyncio.create_task(process_whatsapp_message(body))
-        task.add_done_callback(_log_task_exception)
-        # process_whatsapp_message(body)
-        return {"status": "ok"}
-    else:
-        return JSONResponse(
-            {"status": "error", "message": "Not a WhatsApp API event"},
-            status_code=404,
-        )
+    task = asyncio.create_task(process_whatsapp_message(body))
+    task.add_done_callback(_log_task_exception)
+    # process_whatsapp_message(body)
+    return {"status": "ok"}

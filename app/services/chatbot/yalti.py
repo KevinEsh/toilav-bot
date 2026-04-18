@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
-from chatbot_schema import Customers, OrderItems, Orders, OrderStatus
+from chatbot_schema import Customers, OrderItems, Orders, OrderStatus, Products, Stores
 from config import settings
 from database import engine
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, ModelSettings, RunContext
+from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.usage import UsageLimits
 from rules import ChatOutput, build_mega_prompt
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
+
+# Populated by whatsapp_utils._fetch_products() each time the catalog is loaded.
+PRODUCTS: dict[int, Products] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -31,12 +38,11 @@ class StoreInfo:
 class ChatDeps:
     """Agent dependencies injected on every run."""
 
-    wa_id: str
     customer: Customers
     store: StoreInfo
     products: str  # formatted product catalog injected into the system prompt
-
-
+    active_order_id: int | None = None  # pre-loaded; tools write back here after create_order
+    _once: set[str] = field(default_factory=set)  # tools allowed only once per run
 
 
 # ---------------------------------------------------------------------------
@@ -82,36 +88,101 @@ def _get_or_create_customer(session: Session, wa_id: str, name: str) -> Customer
     return customer
 
 
-def _get_active_order(session: Session, c_id: int) -> Orders | None:
-    """Devuelve el pedido en estado CONSUMER_REVIEWING para el cliente, si existe."""
-    return session.exec(
-        select(Orders)
-        .where(
-            Orders.o_c_id == c_id,
-            Orders.o_status != OrderStatus.CANCELLED,
-            Orders.o_status != OrderStatus.COMPLETED,
+def _get_active_order(c_id: int) -> Orders | None:
+    """Devuelve el pedido activo (no cancelado ni completado) del cliente, si existe."""
+    with Session(engine) as session:
+        return session.exec(
+            select(Orders)
+            .where(
+                Orders.o_c_id == c_id,
+                Orders.o_status != OrderStatus.CANCELLED,
+                Orders.o_status != OrderStatus.COMPLETED,
+            )
+            .order_by(Orders.o_created_at.desc())
+        ).first()
+
+
+def _history_tool_calls(history: list) -> set[str]:
+    """Devuelve los nombres de todas las herramientas llamadas en el historial previo."""
+    called: set[str] = set()
+    for msg in history:
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, ToolCallPart):
+                    called.add(part.tool_name)
+    return called
+
+
+def _order_summary(order: Orders, order_items: list[OrderItems], customer_name: str) -> str:
+    """Construye el resumen del pedido leyendo directamente de la DB. Luce asi:
+    🛍️ Nueva orden — *Juan López*
+
+    • 2x Almendras tostadas — $120
+    • 1x Nueces de la india — $85
+    Total: *$205*
+
+    📍 Calle 15 #45-23
+    ⏰ Mañana, 2–4 pm
+    💳 Transferencia bancaria
+    """
+
+    string_order_items = []
+    for oi in order_items:
+        string_order_items.append(
+            f"• {oi.oi_units}x {PRODUCTS[oi.oi_p_id].p_name} — ${float(oi.oi_unit_price) * oi.oi_units:.0f}"
         )
-        .order_by(Orders.o_created_at.desc())
-    ).first()
+
+    return f"""\
+    🛍️ Nueva orden — {customer_name}
+
+    {"\n".join(string_order_items)}
+
+    Total: ${order.o_total:.0f}
+
+    📍: {order.o_customer_notes}
+    """
+    # 📍 {order.o_delivery_address}
+    # ⏰ {order.o_delivery_instructions}
+    # 💳 {order.o_payment_method}
+
+    # rows = session.exec(
+    #     select(OrderItems, Products).where(
+    #         OrderItems.oi_o_id == o_id, OrderItems.oi_p_id == Products.p_id
+    #     )
+    # ).all()
+    # order = session.get(Orders, o_id)
+    # if not rows or order is None:
+    #     return "Pedido vacío."
+    # lines = [
+    #     f"• {oi.oi_units}x {p.p_name} — ${float(oi.oi_unit_price) * oi.oi_units:.0f}"
+    #     for oi, p in rows
+    # ]
+    # return "\n".join(lines) + f"\nTotal: ${float(order.o_total):.0f}"
 
 
-def _order_summary(session: Session, o_id: int) -> str:
-    """Construye el resumen del pedido leyendo directamente de la DB."""
-    from chatbot_schema import Products  # avoid circular at module level
+# ---------------------------------------------------------------------------
+# Tool prepare functions — gate visibility based on active order state
+# Returning None hides the tool from the LLM entirely (not just a prompt hint).
+# ---------------------------------------------------------------------------
+async def _hide_when_order_exists(
+    ctx: RunContext[ChatDeps], tool_def: ToolDefinition
+) -> ToolDefinition | None:
+    """Hides the tool when an active order already exists."""
+    return None if ctx.deps.active_order_id is not None else tool_def
 
-    rows = session.exec(
-        select(OrderItems, Products).where(
-            OrderItems.oi_o_id == o_id, OrderItems.oi_p_id == Products.p_id
-        )
-    ).all()
-    order = session.get(Orders, o_id)
-    if not rows or order is None:
-        return "Pedido vacío."
-    lines = [
-        f"• {oi.oi_units}x {p.p_name} — ${float(oi.oi_unit_price) * oi.oi_units:.0f}"
-        for oi, p in rows
-    ]
-    return "\n".join(lines) + f"\nTotal: ${float(order.o_total):.0f}"
+
+async def _hide_when_no_order(
+    ctx: RunContext[ChatDeps], tool_def: ToolDefinition
+) -> ToolDefinition | None:
+    """Hides the tool when there is no active order."""
+    return tool_def if ctx.deps.active_order_id is not None else None
+
+
+async def _hide_when_shown(
+    ctx: RunContext[ChatDeps], tool_def: ToolDefinition
+) -> ToolDefinition | None:
+    """Hides show_products if it was already called this turn or in a previous turn."""
+    return None if "show_products" in ctx.deps._once else tool_def
 
 
 # ---------------------------------------------------------------------------
@@ -122,199 +193,249 @@ agent = Agent(
     name="yalti-assistant",
     deps_type=ChatDeps,
     output_type=ChatOutput,
+    model_settings=ModelSettings(temperature=0.1),
+)
+
+# Sin tools — garantiza una respuesta directa en una sola llamada (usado como fallback)
+_direct_agent = Agent(
+    model="openai:gpt-4o-mini",
+    output_type=ChatOutput,
+    # instructions=
 )
 
 
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
-@agent.tool
+@agent.tool(prepare=_hide_when_shown)
 async def show_products(ctx: RunContext[ChatDeps], p_ids: list[int]) -> str:
-    """
-    Muestra los productos al cliente usando el carrosel de imagenes de WhatsApp. Úsala cuando el cliente pregunte
-    por los productos, recomendaciones, dudas, etc.
+    """Envía un carrusel visual de productos al cliente vía WhatsApp.
+
+    Cuándo usarla: el cliente quiere explorar opciones ("¿qué tienen?", "¿qué me recomiendas?").
+    Cuándo NO: preguntas de detalle sobre un producto específico (responde desde el catálogo)
+    o si el cliente ya está armando un pedido. Si falta un dato, usa escalate_to_staff.
 
     Args:
-    p_ids: Lista de p_id de los productos a mostrar (del catálogo en el system prompt).
+        p_ids: Lista de p_id de los productos a mostrar (del catálogo).
     """
-    print(f"show_products called with p_ids={p_ids} for wa_id={ctx.deps.wa_id}")  # DEBUG
-    logger.info("show_products called for %s", ctx.deps.wa_id)
+    ctx.deps._once.add("show_products")
+    logger.info("show_products(%s) called for %s", p_ids, ctx.deps.customer.c_whatsapp_id)
     return "carrusel enviado al cliente"
 
 
-@agent.tool
-async def create_order(ctx: RunContext[ChatDeps], order_items: list[dict]) -> str:
-    """Crea un nuevo pedido para el cliente con los artículos indicados.
-    Cada ítem debe incluir: p_id (int) y qty (int).
-    Usa el p_id exacto del catálogo de productos del system prompt.
+@agent.tool(prepare=_hide_when_order_exists)
+async def create_order(
+    ctx: RunContext[ChatDeps],
+    order_items: list[dict],
+    delivery_address: str,
+    delivery_instructions: str = "",
+) -> str:
+    """Crea un nuevo pedido en la base de datos.
+
+    PRERREQUISITOS — no llamar hasta cumplir todos:
+      1. Cada ítem tiene p_id del catálogo y units >= 1 confirmados por el cliente.
+      2. delivery_address fue proporcionada explícitamente por el cliente (OBLIGATORIO).
+      3. delivery_instructions fue preguntada (puede ser cadena vacía si el cliente no tiene).
+      4. El cliente confirmó el resumen con una respuesta afirmativa SEPARADA al mensaje de resumen.
+         El mensaje original del pedido no cuenta como confirmación.
 
     Args:
-        order_items: Lista de ítems del pedido, e.g. [{"p_id": 3, "qty": 2}].
+        order_items: Lista de ítems, cada uno con p_id (int) y units (int >= 1).
+                     Ejemplo: [{"p_id": 3, "units": 2}]
+        delivery_address: Dirección de entrega dada por el cliente. OBLIGATORIO — nunca inferir ni inventar.
+        delivery_instructions: Instrucciones especiales para la entrega. No puede ser genérica como "" sin detalles.
     """
-    from chatbot_schema import Products  # avoid circular at module level
+    logger.info(f"create_order({order_items=}, {delivery_address=}, {delivery_instructions=})")
 
-    wa_id = ctx.deps.wa_id
     with Session(engine) as session:
         order = Orders(
             o_c_id=ctx.deps.customer.c_id,
             o_s_id=ctx.deps.store.s_id,
-            o_status=OrderStatus.CONSUMER_REVIEWING,
+            o_status=OrderStatus.PENDING_STORE_APPROVAL,
+            o_customer_notes=f"Dirección: {delivery_address} | Instrucciones: {delivery_instructions}",
         )
         session.add(order)
         session.flush()
 
-        ois = []
+        items = []
         subtotal = 0.0
         for item in order_items:
-            # product = session.get(Products, item["p_id"])
-            # if product is None:
-            #     logger.warning("create_order: p_id=%s not found, skipping", item["p_id"])
-            #     continue
-
-            # qty = int(item.get("qty", 1))
+            unit_price = float(PRODUCTS[item["p_id"]].p_sale_price)
+            subtotal += unit_price * item["units"]
             oi = OrderItems(
                 oi_o_id=order.o_id,
                 oi_p_id=item["p_id"],
                 oi_units=item["units"],
-                # oi_unit_price=product.p_sale_price
+                oi_unit_price=unit_price,
             )
-            # session.add(oi)
-            ois.append(oi)  # add to relationship for automatic o_id assignment
-            # subtotal += product.p_sale_price * qty
-
-        session.add_all(ois)
-        session.flush()
+            items.append(oi)
 
         order.o_subtotal = subtotal
-        order.o_total = subtotal
+        order.o_shipping_amount = 20.0  # flat shipping for now
+        order.o_total = subtotal + order.o_shipping_amount
+
+        session.add_all(items)
         session.commit()
+
         session.refresh(order)
+        session.refresh(
+            items[0]
+        )  # refresh one item to ensure order_items relationship is populated
 
-        logger.info("Order o_id=%s created for %s", order.o_id, wa_id)
-        return f"Pedido creado (o_id={order.o_id}):\n{_order_summary(session, order.o_id)}"
-
-
-@agent.tool
-async def get_order(ctx: RunContext[ChatDeps]) -> str:
-    """Devuelve el resumen del pedido activo del cliente."""
-    wa_id = ctx.deps.wa_id
-    with Session(engine) as session:
-        customer = session.exec(select(Customers).where(Customers.c_whatsapp_id == wa_id)).first()
-        if customer is None:
-            return "No hay un pedido activo."
-        order = _get_active_order(session, customer.c_id)
-        if order is None:
-            return "No hay un pedido activo."
-        return f"Pedido actual (o_id={order.o_id}):\n{_order_summary(session, order.o_id)}"
+        print(order)
+        print(items)
+        ctx.deps.active_order_id = order.o_id  # cache so subsequent tools skip the DB lookup
+        logger.info(
+            "create_order created o_id=%s for c_id=%s",
+            order.o_id,
+            ctx.deps.customer.c_id,
+        )
+        return _order_summary(order, items, ctx.deps.customer.c_name)
 
 
-@agent.tool
+# @agent.tool(prepare=_hide_when_no_order)
+# async def get_order(ctx: RunContext[ChatDeps]) -> str:
+#     """Devuelve el resumen actual del pedido activo del cliente."""
+#     with Session(engine) as session:
+#         order = session.get(Orders, ctx.deps.active_order_id)
+#         if order is None:
+#             return "No se encontró el pedido activo."
+#         return _order_summary(order, ctx.deps.customer.c_name)
+
+
+@agent.tool(prepare=_hide_when_no_order)
 async def update_order(
     ctx: RunContext[ChatDeps],
     action: str,
     p_id: int,
-    qty: int = 1,
+    units: int = 0,
 ) -> str:
     """Modifica el pedido activo del cliente.
 
     Args:
         action:
-          'add'        — aumenta la cantidad del ítem en `qty` unidades
-                         (lo crea si no existe).
-          'reduce_qty' — reduce la cantidad en `qty` unidades.
-                         Si llega a 0, elimina el ítem.
-          'update_qty' — establece la cantidad exactamente a `qty`.
+          'add'        — aumenta la cantidad del ítem en `units` unidades (lo crea si no existe).
+          'reduce_units' — reduce la cantidad en `units` unidades; si llega a 0 elimina el ítem.
+          'set_units' — establece la cantidad exactamente a `units`.
           'remove'     — elimina el ítem completo del pedido.
         p_id: ID del producto a modificar (del catálogo en el system prompt).
-        qty: Cantidad a usar según la acción (default 1).
+        units: Cantidad a usar según la acción (default 0).
     """
-    from chatbot_schema import Products  # avoid circular at module level
+    c_id = ctx.deps.customer.c_id
+    o_id = ctx.deps.active_order_id
 
-    wa_id = ctx.deps.wa_id
+    logger.info(f"update_order({action=}, {p_id=}, {units=}) for {o_id=} {c_id=}")
+
     with Session(engine) as session:
-        customer = session.exec(select(Customers).where(Customers.c_whatsapp_id == wa_id)).first()
-        if customer is None:
-            return "No hay un pedido activo. Usa create_order primero."
-
-        order = _get_active_order(session, customer.c_id)
-        if order is None:
-            return "No hay un pedido activo. Usa create_order primero."
+        order = session.get(Orders, o_id)
 
         existing = session.exec(
-            select(OrderItems).where(
-                OrderItems.oi_o_id == order.o_id,
-                OrderItems.oi_p_id == p_id,
-            )
+            select(OrderItems).where(OrderItems.oi_o_id == o_id, OrderItems.oi_p_id == p_id)
         ).first()
 
         match action:
             case "add":
                 if existing:
-                    existing.oi_units += qty
+                    existing.oi_units += units
                     session.add(existing)
                 else:
                     product = session.get(Products, p_id)
                     if product is None:
                         return f"No se encontró el producto con p_id={p_id}."
-                    oi = OrderItems(
-                        oi_o_id=order.o_id,
-                        oi_p_id=p_id,
-                        oi_units=qty,
-                        oi_unit_price=float(product.p_sale_price),
+                    session.add(
+                        OrderItems(
+                            oi_o_id=o_id,
+                            oi_p_id=p_id,
+                            oi_units=units,
+                            oi_unit_price=float(product.p_sale_price),
+                        )
                     )
-                    session.add(oi)
-            case "reduce_qty":
+            case "reduce_units":
                 if existing is None:
-                    return f"No se encontró p_id={p_id} en el pedido."
-                existing.oi_units -= qty
+                    return f"p_id={p_id} no está en el pedido."
+                existing.oi_units -= units
                 if existing.oi_units <= 0:
                     session.delete(existing)
                 else:
                     session.add(existing)
-            case "update_qty":
+            case "update_units":
                 if existing is None:
-                    return f"No se encontró p_id={p_id} en el pedido."
-                existing.oi_units = qty
+                    return f"p_id={p_id} no está en el pedido."
+                existing.oi_units = units
                 session.add(existing)
             case "remove":
                 if existing is None:
-                    return f"No se encontró p_id={p_id} en el pedido."
+                    return f"p_id={p_id} no está en el pedido."
                 session.delete(existing)
             case _:
-                return f"Acción desconocida: {action}. Usa 'add', 'reduce_qty', 'update_qty' o 'remove'."
+                return f"Acción desconocida: {action!r}. Usa 'add', 'reduce_units', 'update_units' o 'remove'."
 
-        # Recompute totals
         session.flush()
-        all_items = session.exec(select(OrderItems).where(OrderItems.oi_o_id == order.o_id)).all()
+        all_items = session.exec(select(OrderItems).where(OrderItems.oi_o_id == o_id)).all()
         total = sum(float(i.oi_unit_price) * i.oi_units for i in all_items)
         order.o_subtotal = total
         order.o_total = total
         session.add(order)
         session.commit()
 
-        return f"Pedido actualizado:\n{_order_summary(session, order.o_id)}"
+        return f"Pedido actualizado:\n{_order_summary(session, o_id)}"
+
+
+# @agent.tool(prepare=_hide_when_no_order)
+# async def notify_staff_order_ready(ctx: RunContext[ChatDeps]) -> str:
+#     """Notifica al dueño que el cliente confirmó su pedido y está listo para aprobación.
+
+#     Solo cuando el cliente confirme de forma inequívoca ("sí, confírmalo", "listo",
+#     "procede"). Para consultas generales usa escalate_to_staff.
+#     """
+#     o_id = ctx.deps.active_order_id
+#     with Session(engine) as session:
+#         order = session.get(Orders, o_id)
+#         summary = _order_summary(session, o_id)
+#         order.o_status = OrderStatus.PENDING_STORE_APPROVAL
+#         session.add(order)
+#         session.commit()
+
+#     logger.info("notify_staff_order_ready o_id=%s for c_id=%s", o_id, ctx.deps.customer.c_id)
+#     # TODO: send WhatsApp message to OWNER_WA_ID with summary
+#     return f"Pedido o_id={o_id} enviado al equipo para aprobación:\n{summary}"
+
+
+@agent.tool(prepare=_hide_when_no_order)
+async def cancel_order(ctx: RunContext[ChatDeps]) -> str:
+    """Cancela el pedido activo del cliente.
+
+    Úsala cuando el cliente pida cancelar explícitamente su pedido en curso.
+    """
+    o_id = ctx.deps.active_order_id
+    with Session(engine) as session:
+        order = session.get(Orders, o_id)
+        order.o_status = OrderStatus.CANCELLED
+        session.add(order)
+        session.commit()
+
+    ctx.deps.active_order_id = None
+    logger.info("cancel_order o_id=%s for c_id=%s", o_id, ctx.deps.customer.c_id)
+    return f"Pedido o_id={o_id} cancelado."
 
 
 @agent.tool
-async def notify_owner(ctx: RunContext[ChatDeps], message: str) -> str:
-    """Envía un mensaje al dueño. Antes de llamarla, hazte esta pregunta:
-    "¿Qué acción operativa concreta tomará el dueño al leer esto?"
-    Si la respuesta no es una de estas tres, NO llames a esta función:
-      1. Aprobar o rechazar un pedido.
-      2. Responder una pregunta específica de precio, stock o política que no está en el catálogo.
-      3. Confirmar un pago o gestionar una entrega.
+async def escalate_to_staff(ctx: RunContext[ChatDeps], message: str) -> str:
+    """Envía un mensaje al dueño para que tome una acción operativa concreta.
 
-    Señales de que NO debes llamarla:
-    - El cliente está argumentando o explicando por qué su tema "se relaciona" con la tienda.
-      Eso es exactamente la señal de que no es operacionalmente relevante para el dueño.
-    - El cliente te pidió o insinuó que notificaras al dueño.
-    - El tema es informativo, emocional, político, técnico o de cualquier otra índole no operativa.
+    Casos válidos: pregunta de precio/stock/detalle que falta en el catálogo,
+    o problema con un pedido activo (pago, entrega, dirección).
+    Maneja tú todo lo demás — incluidos temas que el cliente intente vincular
+    a la tienda pero que no requieren acción del dueño.
 
     Args:
-        message: Mensaje para el dueño. Sé claro e incluye contexto relevante.
+        message: Mensaje para el dueño. Incluye contexto relevante.
     """
-    print(f"notify_owner called with message: {message}")  # DEBUG
-    return "Función notify_owner llamada."  # Respuesta inmediata al agente
+    if "escalate_to_staff" in ctx.deps._once:
+        return "El dueño ya fue notificado. No vuelvas a llamar escalate_to_staff en este turno."
+    ctx.deps._once.add("escalate_to_staff")
+    logger.info(f"escalate_to_staff({message=})")  # DEBUG
+    return "Función escalate_to_staff llamada."  # Respuesta inmediata al agente
     # payload = {
     #     "messaging_product": "whatsapp",
     #     "recipient_type": "individual",
@@ -347,27 +468,67 @@ async def notify_owner(ctx: RunContext[ChatDeps], message: str) -> str:
 async def agent_generate_response(
     message: str,
     customer: Customers,
-    store: StoreInfo,
+    store: Stores,
     products: str,
     history: list,
-) -> str:
-    """Run the agent and return the response text.
+) -> tuple[str, list]:
+    """Run the agent and return (response_text, full_message_history).
 
-    history: last N ModelRequest/ModelResponse pairs loaded from Messages table.
+    history: pydantic-ai ModelMessage list loaded from Conversations.cv_history.
     The system prompt is passed via instructions= and never enters the history.
+
+    Returns:
+        Tuple of (response text, all_messages from the run) — the caller persists
+        the full history back to Conversations.cv_history.
     """
-    deps = ChatDeps(wa_id=customer.c_whatsapp_id, customer=customer, store=store, products=products)
+    existing_order = _get_active_order(customer.c_id)
+    # Pre-populate _once from history so show_products stays hidden across turns.
+    once = _history_tool_calls(history) & {"show_products"}
+    deps = ChatDeps(
+        customer=customer,
+        store=store,
+        products=products,
+        active_order_id=existing_order.o_id if existing_order else None,
+        _once=once,
+    )
     system_prompt = build_mega_prompt(
         customer_name=customer.c_name,
-        store_name=store.name,
-        store_description=store.description,
+        store_name=store.s_name,
+        store_description=store.s_description,
         products=products,
     )
-    result = await agent.run(
-        message,
-        deps=deps,
-        message_history=history,
-        instructions=system_prompt,
-    )
-    logger.info("Response for %s: %.100s", customer.c_whatsapp_id, result.output.response)
-    return result.output.response
+    # DEBUG: iter() para ver cada nodo del loop — reemplazar con agent.run() en producción
+    try:
+        # async with agent.iter(
+        #     message,
+        #     deps=deps,
+        #     message_history=history,
+        #     instructions=system_prompt,
+        #     usage_limits=UsageLimits(request_limit=8),
+        # ) as run:
+        #     async for node in run:
+        # print("-" * 20)  # DEBUG: separador entre nodos
+        # logger.info("[%s] %s", type(node).__name__, n)
+        # print("-" * 20)
+        # print(node)  # DEBUG: print each node
+        result = await agent.run(
+            message,
+            deps=deps,
+            message_history=history,
+            instructions=system_prompt,
+            usage_limits=UsageLimits(request_limit=8),
+        )
+        return result.output.response, result.all_messages()
+    except UsageLimitExceeded as e:
+        # UsageLimitExceeded se lanza desde __aexit__, no desde el loop.
+        # run sigue en scope porque fue asignado en __aenter__.
+        logger.warning("Request limit hit after %s requests: %s", result.usage().requests, e)
+        final = await _direct_agent.run(
+            message,
+            message_history=result.all_messages(),
+            instructions=system_prompt
+            + "\nResponde directamente al cliente ahora, sin usar herramientas. "
+            "NO prometas acciones que aún no se completaron (crear pedido, confirmar, etc.). "
+            "Si aún falta información del cliente, haz la pregunta de clarificación que corresponde.",
+        )
+        return final.output.response, final.all_messages()
