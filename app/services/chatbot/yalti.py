@@ -239,58 +239,88 @@ async def create_order(
       4. El cliente confirmó el resumen con una respuesta afirmativa SEPARADA al mensaje de resumen.
          El mensaje original del pedido no cuenta como confirmación.
 
+    Si esta función retorna un error de validación (string que empieza con "ERROR_VALIDACION:"),
+    NO debes crear el pedido. Primero obtén la información faltante del cliente y vuelve a llamar
+    esta función con los parámetros corregidos.
+
     Args:
         order_items: Lista de ítems, cada uno con p_id (int) y units (int >= 1).
                      Ejemplo: [{"p_id": 3, "units": 2}]
         delivery_address: Dirección de entrega dada por el cliente. OBLIGATORIO — nunca inferir ni inventar.
-        delivery_instructions: Instrucciones especiales para la entrega. No puede ser genérica como "" sin detalles.
+        delivery_instructions: Instrucciones especiales para la entrega. Puede ser cadena vacía si el cliente no tiene.
     """
     logger.info(f"create_order({order_items=}, {delivery_address=}, {delivery_instructions=})")
 
-    with Session(engine) as session:
-        order = Orders(
-            o_c_id=ctx.deps.customer.c_id,
-            o_s_id=ctx.deps.store.s_id,
-            o_status=OrderStatus.PENDING_STORE_APPROVAL,
-            o_customer_notes=f"Dirección: {delivery_address} | Instrucciones: {delivery_instructions}",
-        )
-        session.add(order)
-        session.flush()
+    # --- Validaciones de entrada (no tocan la DB) ---
+    if not order_items:
+        return "ERROR_VALIDACION: order_items está vacío. Pide al cliente que especifique qué productos quiere."
 
-        items = []
-        subtotal = 0.0
-        for item in order_items:
-            unit_price = float(PRODUCTS[item["p_id"]].p_sale_price)
-            subtotal += unit_price * item["units"]
-            oi = OrderItems(
-                oi_o_id=order.o_id,
-                oi_p_id=item["p_id"],
-                oi_units=item["units"],
-                oi_unit_price=unit_price,
+    if not delivery_address or not delivery_address.strip():
+        return "ERROR_VALIDACION: delivery_address es obligatoria. Pide al cliente su dirección de entrega."
+
+    errors = []
+    for i, item in enumerate(order_items):
+        if not isinstance(item, dict):
+            errors.append(f"Ítem {i}: debe ser un dict con p_id y units.")
+            continue
+        if "p_id" not in item or "units" not in item:
+            errors.append(f"Ítem {i}: faltan campos 'p_id' o 'units'.")
+            continue
+        if item["p_id"] not in PRODUCTS:
+            errors.append(f"Ítem {i}: p_id={item['p_id']} no existe en el catálogo.")
+        if not isinstance(item["units"], int) or item["units"] < 1:
+            errors.append(f"Ítem {i} (p_id={item.get('p_id')}): units debe ser un entero >= 1, recibido: {item.get('units')}.")
+
+    if errors:
+        return "ERROR_VALIDACION:\n" + "\n".join(f"- {e}" for e in errors)
+
+    # --- Escritura a DB ---
+    try:
+        with Session(engine) as session:
+            order = Orders(
+                o_c_id=ctx.deps.customer.c_id,
+                o_s_id=ctx.deps.store.s_id,
+                o_status=OrderStatus.PENDING_STORE_APPROVAL,
+                o_customer_notes=f"Dirección: {delivery_address.strip()} | Instrucciones: {delivery_instructions}",
             )
-            items.append(oi)
+            session.add(order)
+            session.flush()
 
-        order.o_subtotal = subtotal
-        order.o_shipping_amount = 20.0  # flat shipping for now
-        order.o_total = subtotal + order.o_shipping_amount
+            items = []
+            subtotal = 0.0
+            for item in order_items:
+                unit_price = float(PRODUCTS[item["p_id"]].p_sale_price)
+                subtotal += unit_price * item["units"]
+                oi = OrderItems(
+                    oi_o_id=order.o_id,
+                    oi_p_id=item["p_id"],
+                    oi_units=item["units"],
+                    oi_unit_price=unit_price,
+                )
+                items.append(oi)
 
-        session.add_all(items)
-        session.commit()
+            order.o_subtotal = subtotal
+            order.o_shipping_amount = 20.0  # flat shipping for now
+            order.o_total = subtotal + order.o_shipping_amount
 
-        session.refresh(order)
-        session.refresh(
-            items[0]
-        )  # refresh one item to ensure order_items relationship is populated
+            session.add_all(items)
+            session.commit()
 
-        print(order)
-        print(items)
-        ctx.deps.active_order_id = order.o_id  # cache so subsequent tools skip the DB lookup
-        logger.info(
-            "create_order created o_id=%s for c_id=%s",
-            order.o_id,
-            ctx.deps.customer.c_id,
-        )
-        return _order_summary(order, items, ctx.deps.customer.c_name)
+            session.refresh(order)
+            for oi in items:
+                session.refresh(oi)
+
+            ctx.deps.active_order_id = order.o_id
+            logger.info(
+                "create_order created o_id=%s for c_id=%s",
+                order.o_id,
+                ctx.deps.customer.c_id,
+            )
+            return _order_summary(order, items, ctx.deps.customer.c_name)
+
+    except Exception as e:
+        logger.error("create_order failed for c_id=%s: %s", ctx.deps.customer.c_id, e)
+        return "ERROR_INTERNO: No se pudo crear el pedido por un problema técnico. Intenta de nuevo en un momento."
 
 
 # @agent.tool(prepare=_hide_when_no_order)
