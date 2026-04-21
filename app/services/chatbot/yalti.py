@@ -342,73 +342,95 @@ async def update_order(
 ) -> str:
     """Modifica el pedido activo del cliente.
 
+    Si retorna un string que empieza con "ERROR_VALIDACION:", obtén la información
+    correcta del cliente y vuelve a llamar con los parámetros corregidos.
+
     Args:
         action:
-          'add'        — aumenta la cantidad del ítem en `units` unidades (lo crea si no existe).
+          'add'          — aumenta la cantidad del ítem en `units` unidades (lo crea si no existe).
           'reduce_units' — reduce la cantidad en `units` unidades; si llega a 0 elimina el ítem.
-          'set_units' — establece la cantidad exactamente a `units`.
-          'remove'     — elimina el ítem completo del pedido.
+          'set_units'    — establece la cantidad exactamente a `units` (>= 1).
+          'remove'       — elimina el ítem completo del pedido.
         p_id: ID del producto a modificar (del catálogo en el system prompt).
-        units: Cantidad a usar según la acción (default 0).
+        units: Cantidad a usar según la acción. Requerido (>= 1) para 'add', 'reduce_units', 'set_units'.
     """
     c_id = ctx.deps.customer.c_id
     o_id = ctx.deps.active_order_id
 
     logger.info(f"update_order({action=}, {p_id=}, {units=}) for {o_id=} {c_id=}")
 
-    with Session(engine) as session:
-        order = session.get(Orders, o_id)
+    # --- Validaciones de entrada (no tocan la DB) ---
+    valid_actions = {"add", "reduce_units", "set_units", "remove"}
+    if action not in valid_actions:
+        return f"ERROR_VALIDACION: acción {action!r} desconocida. Usa: {', '.join(sorted(valid_actions))}."
 
-        existing = session.exec(
-            select(OrderItems).where(OrderItems.oi_o_id == o_id, OrderItems.oi_p_id == p_id)
-        ).first()
+    if p_id not in PRODUCTS:
+        return f"ERROR_VALIDACION: p_id={p_id} no existe en el catálogo."
 
-        match action:
-            case "add":
-                if existing:
-                    existing.oi_units += units
-                    session.add(existing)
-                else:
-                    product = session.get(Products, p_id)
-                    if product is None:
-                        return f"No se encontró el producto con p_id={p_id}."
-                    session.add(
-                        OrderItems(
+    if action in {"add", "reduce_units", "set_units"} and units < 1:
+        return f"ERROR_VALIDACION: units debe ser >= 1 para la acción '{action}', recibido: {units}."
+
+    # --- Escritura a DB ---
+    try:
+        with Session(engine) as session:
+            order = session.get(Orders, o_id)
+            if order is None:
+                return f"ERROR_INTERNO: no se encontró el pedido o_id={o_id}."
+
+            existing = session.exec(
+                select(OrderItems).where(OrderItems.oi_o_id == o_id, OrderItems.oi_p_id == p_id)
+            ).first()
+
+            product = PRODUCTS[p_id]
+
+            match action:
+                case "add":
+                    if existing:
+                        existing.oi_units += units
+                        session.add(existing)
+                    else:
+                        session.add(OrderItems(
                             oi_o_id=o_id,
                             oi_p_id=p_id,
                             oi_units=units,
                             oi_unit_price=float(product.p_sale_price),
-                        )
-                    )
-            case "reduce_units":
-                if existing is None:
-                    return f"p_id={p_id} no está en el pedido."
-                existing.oi_units -= units
-                if existing.oi_units <= 0:
-                    session.delete(existing)
-                else:
+                        ))
+                case "reduce_units":
+                    if existing is None:
+                        return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
+                    existing.oi_units -= units
+                    if existing.oi_units <= 0:
+                        session.delete(existing)
+                    else:
+                        session.add(existing)
+                case "set_units":
+                    if existing is None:
+                        return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
+                    existing.oi_units = units
                     session.add(existing)
-            case "update_units":
-                if existing is None:
-                    return f"p_id={p_id} no está en el pedido."
-                existing.oi_units = units
-                session.add(existing)
-            case "remove":
-                if existing is None:
-                    return f"p_id={p_id} no está en el pedido."
-                session.delete(existing)
-            case _:
-                return f"Acción desconocida: {action!r}. Usa 'add', 'reduce_units', 'update_units' o 'remove'."
+                case "remove":
+                    if existing is None:
+                        return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
+                    session.delete(existing)
 
-        session.flush()
-        all_items = session.exec(select(OrderItems).where(OrderItems.oi_o_id == o_id)).all()
-        total = sum(float(i.oi_unit_price) * i.oi_units for i in all_items)
-        order.o_subtotal = total
-        order.o_total = total
-        session.add(order)
-        session.commit()
+            session.flush()
+            all_items = session.exec(select(OrderItems).where(OrderItems.oi_o_id == o_id)).all()
 
-        return f"Pedido actualizado:\n{_order_summary(session, o_id)}"
+            if not all_items:
+                session.rollback()
+                return "ERROR_VALIDACION: no puedes eliminar todos los ítems del pedido. Usa cancel_order si quieres cancelarlo."
+
+            total = sum(float(i.oi_unit_price) * i.oi_units for i in all_items)
+            order.o_subtotal = total
+            order.o_total = total
+            session.add(order)
+            session.commit()
+
+            return f"Pedido actualizado:\n{_order_summary(order, all_items, ctx.deps.customer.c_name)}"
+
+    except Exception as e:
+        logger.error("update_order failed for o_id=%s c_id=%s: %s", o_id, c_id, e)
+        return "ERROR_INTERNO: No se pudo actualizar el pedido por un problema técnico. Intenta de nuevo en un momento."
 
 
 # @agent.tool(prepare=_hide_when_no_order)

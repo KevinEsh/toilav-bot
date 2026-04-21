@@ -28,7 +28,7 @@
 ---
 
 ### 2. Robustecer `update_order` en yalti.py
-**Estado:** Pendiente  
+**Estado:** ✅ Completado (2026-04-19)  
 **Effort:** 30-45 min  
 **Issues:**
 - ❌ **BUG FATAL (L381):** `_order_summary(session, o_id)` pero espera `(order, order_items, customer_name)`
