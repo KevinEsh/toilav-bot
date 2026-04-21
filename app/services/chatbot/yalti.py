@@ -459,16 +459,35 @@ async def cancel_order(ctx: RunContext[ChatDeps]) -> str:
 
     Úsala cuando el cliente pida cancelar explícitamente su pedido en curso.
     """
+    c_id = ctx.deps.customer.c_id
     o_id = ctx.deps.active_order_id
-    with Session(engine) as session:
-        order = session.get(Orders, o_id)
-        order.o_status = OrderStatus.CANCELLED
-        session.add(order)
-        session.commit()
 
-    ctx.deps.active_order_id = None
-    logger.info("cancel_order o_id=%s for c_id=%s", o_id, ctx.deps.customer.c_id)
-    return f"Pedido o_id={o_id} cancelado."
+    logger.info(f"cancel_order({o_id=}, {c_id=})")
+
+    # --- Escritura a DB ---
+    try:
+        with Session(engine) as session:
+            order = session.get(Orders, o_id)
+            if order is None:
+                return f"ERROR_INTERNO: no se encontró el pedido o_id={o_id}."
+
+            if order.o_status in {OrderStatus.CANCELLED, OrderStatus.COMPLETED}:
+                return (
+                    f"ERROR_VALIDACION: el pedido o_id={o_id} ya está en estado "
+                    f"{order.o_status.value} y no puede cancelarse."
+                )
+
+            order.o_status = OrderStatus.CANCELLED
+            session.add(order)
+            session.commit()
+
+        ctx.deps.active_order_id = None
+        logger.info("cancel_order o_id=%s for c_id=%s", o_id, c_id)
+        return f"Pedido o_id={o_id} cancelado."
+
+    except Exception as e:
+        logger.error("cancel_order failed for o_id=%s c_id=%s: %s", o_id, c_id, e)
+        return "ERROR_INTERNO: No se pudo cancelar el pedido por un problema técnico. Intenta de nuevo en un momento."
 
 
 @agent.tool

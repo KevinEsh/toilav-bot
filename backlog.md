@@ -48,13 +48,19 @@
 ---
 
 ### 3. Robustecer `cancel_order` en yalti.py
-**Estado:** Pendiente  
+**Estado:** ✅ Completado (2026-04-20)  
 **Effort:** 10-15 min  
 **Issues:**
 - ❌ No valida que `order` existe antes de modificar
+- ❌ Sin try/except en escritura a DB
+- ❌ Permitía re-cancelar órdenes `COMPLETED` / `CANCELLED`
+- ❌ `active_order_id` se limpiaba aunque el commit fallara
 
 **Aceptación:**
 - Validación presentes
+- Guard contra estados terminales
+- `active_order_id` limpiado sólo tras commit exitoso
+- Tests: `tests/test_cancel_order.py` (7/7 ✅)
 
 ---
 
