@@ -114,7 +114,7 @@ def _history_tool_calls(history: list) -> set[str]:
 
 
 def _order_summary(order: Orders, order_items: list[OrderItems], customer_name: str) -> str:
-    """Construye el resumen del pedido leyendo directamente de la DB. Luce asi:
+    """Construye el resumen del pedido. Luce asi:
     🛍️ Nueva orden — *Juan López*
 
     • 2x Almendras tostadas — $120
@@ -122,25 +122,24 @@ def _order_summary(order: Orders, order_items: list[OrderItems], customer_name: 
     Total: *$205*
 
     📍 Calle 15 #45-23
-    ⏰ Mañana, 2–4 pm
-    💳 Transferencia bancaria
     """
+    if not order_items:
+        return f"🛍️ Pedido — {customer_name}\n\n(sin ítems)\n\nTotal: $0"
 
-    string_order_items = []
+    lines = []
     for oi in order_items:
-        string_order_items.append(
-            f"• {oi.oi_units}x {PRODUCTS[oi.oi_p_id].p_name} — ${float(oi.oi_unit_price) * oi.oi_units:.0f}"
-        )
+        product = PRODUCTS.get(oi.oi_p_id)
+        prod_name = product.p_name if product is not None else f"Producto #{oi.oi_p_id}"
+        line_total = float(oi.oi_unit_price) * oi.oi_units
+        lines.append(f"• {oi.oi_units}x {prod_name} — ${line_total:.0f}")
 
-    return f"""\
-    🛍️ Nueva orden — {customer_name}
-
-    {"\n".join(string_order_items)}
-
-    Total: ${order.o_total:.0f}
-
-    📍: {order.o_customer_notes}
-    """
+    total = float(order.o_total) if order.o_total is not None else 0.0
+    notes = order.o_customer_notes or "(sin notas)"
+    return (
+        f"🛍️ Nueva orden — {customer_name}\n\n"
+        + "\n".join(lines)
+        + f"\n\nTotal: ${total:.0f}\n\n📍: {notes}"
+    )
     # 📍 {order.o_delivery_address}
     # ⏰ {order.o_delivery_instructions}
     # 💳 {order.o_payment_method}

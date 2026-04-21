@@ -67,13 +67,19 @@
 ## 🟠 Altas (Logística/datos)
 
 ### 4. Robustecer `_order_summary` en yalti.py
-**Estado:** Pendiente  
+**Estado:** ✅ Completado (2026-04-20)  
 **Effort:** 15-20 min  
 **Issues:**
 - ❌ Acceso directo `PRODUCTS[oi.oi_p_id]` sin validar existencia → KeyError
+- ❌ `o_customer_notes` nullable renderizaba como "None" al cliente
+- ❌ `o_total` Decimal sin `float()` explícito (inconsistente con el resto)
+- ❌ `order_items=[]` producía mensaje malformado
 
 **Aceptación:**
 - Validación presente con fallback
+- "(sin notas)" / "(sin ítems)" como fallbacks visibles
+- `float()` explícito para Decimal
+- Tests: `tests/test_order_summary.py` (10/10 ✅)
 
 ---
 
