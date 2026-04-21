@@ -84,16 +84,22 @@
 ---
 
 ### 5. Implementar `escalate_to_staff` en yalti.py
-**Estado:** Pendiente  
+**Estado:** ✅ Completado (2026-04-20)  
 **Effort:** 20-30 min  
 **Issues:**
 - ❌ Lógica real comentada (L439-462)
 - ❌ Retorna solo dummy string
+- ❌ Sin validación de `message` vacío
+- ❌ Sin validación de credenciales / `OWNER_WA_ID`
+- ❌ Sin contexto del cliente en el mensaje al dueño
+- ❌ `_once` se marcaba antes de validar — gastaba la única escalation del turno
 
 **Aceptación:**
-- Código descomentado y funcional
-- Manejo de errores HTTP
-- Tests que simulen envío a WhatsApp API
+- Código HTTP funcional (llamada directa a WhatsApp Graph API)
+- Manejo por tipo de excepción: `HTTPStatusError`, `TimeoutException`, `HTTPError`
+- Validaciones con contrato `ERROR_VALIDACION` / `ERROR_INTERNO`
+- Nombre + wa_id del cliente incluidos en el body al dueño
+- Tests: `tests/test_escalate_to_staff.py` (13/13 ✅)
 
 ---
 

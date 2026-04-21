@@ -503,33 +503,55 @@ async def escalate_to_staff(ctx: RunContext[ChatDeps], message: str) -> str:
     """
     if "escalate_to_staff" in ctx.deps._once:
         return "El dueño ya fue notificado. No vuelvas a llamar escalate_to_staff en este turno."
+
+    customer = ctx.deps.customer
+    if not message or not message.strip():
+        return "ERROR_VALIDACION: el mensaje al dueño no puede estar vacío."
+
+    if not settings.OWNER_WA_ID:
+        logger.error("escalate_to_staff: OWNER_WA_ID not configured")
+        return "ERROR_INTERNO: notificación al dueño no configurada en el sistema."
+    if not settings.WHATSAPP_ACCESS_TOKEN or not settings.PHONE_NUMBER_ID:
+        logger.error("escalate_to_staff: WhatsApp API credentials missing")
+        return "ERROR_INTERNO: credenciales de WhatsApp no configuradas."
+
     ctx.deps._once.add("escalate_to_staff")
-    logger.info(f"escalate_to_staff({message=})")  # DEBUG
-    return "Función escalate_to_staff llamada."  # Respuesta inmediata al agente
-    # payload = {
-    #     "messaging_product": "whatsapp",
-    #     "recipient_type": "individual",
-    #     "to": settings.OWNER_WA_ID,
-    #     "type": "text",
-    #     "text": {"preview_url": False, "body": message},
-    # }
-    # headers = {"Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}"}
-    # url = (
-    #     f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}"
-    #     f"/{settings.PHONE_NUMBER_ID}/messages"
-    # )
-    # async with httpx.AsyncClient() as client:
-    #     try:
-    #         response = await client.post(url, json=payload, headers=headers, timeout=10)
-    #         response.raise_for_status()
-    #         logger.info("Owner notified from %s: %s", ctx.deps.wa_id, message)
-    #         return "Notificación enviada al dueño de la tienda."
-    #     except httpx.HTTPStatusError as e:
-    #         logger.error("Failed to notify owner (HTTP %s): %s", e.response.status_code, e.response.text)
-    #         return "No se pudo notificar al dueño. Intenta más tarde."
-    #     except Exception as e:
-    #         logger.error("Failed to notify owner: %s", e)
-    #         return "No se pudo notificar al dueño. Intenta más tarde."
+    body = (
+        f"🔔 Consulta de *{customer.c_name}* ({customer.c_whatsapp_id}):\n\n"
+        f"{message.strip()}"
+    )
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": settings.OWNER_WA_ID,
+        "type": "text",
+        "text": {"preview_url": False, "body": body},
+    }
+    headers = {"Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}"}
+    url = (
+        f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}"
+        f"/{settings.PHONE_NUMBER_ID}/messages"
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, headers=headers, timeout=10)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        logger.error(
+            "escalate_to_staff HTTP %s for c_id=%s: %s",
+            e.response.status_code, customer.c_id, e.response.text,
+        )
+        return "ERROR_INTERNO: no se pudo notificar al dueño. Intenta más tarde."
+    except httpx.TimeoutException:
+        logger.error("escalate_to_staff timeout for c_id=%s", customer.c_id)
+        return "ERROR_INTERNO: no se pudo notificar al dueño (timeout). Intenta más tarde."
+    except httpx.HTTPError as e:
+        logger.error("escalate_to_staff network error for c_id=%s: %s", customer.c_id, e)
+        return "ERROR_INTERNO: no se pudo notificar al dueño. Intenta más tarde."
+
+    logger.info("Owner notified from c_id=%s: %s", customer.c_id, message)
+    return "Notificación enviada al dueño de la tienda."
 
 
 # ---------------------------------------------------------------------------
