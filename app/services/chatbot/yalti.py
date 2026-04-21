@@ -89,17 +89,26 @@ def _get_or_create_customer(session: Session, wa_id: str, name: str) -> Customer
 
 
 def _get_active_order(c_id: int) -> Orders | None:
-    """Devuelve el pedido activo (no cancelado ni completado) del cliente, si existe."""
-    with Session(engine) as session:
-        return session.exec(
-            select(Orders)
-            .where(
-                Orders.o_c_id == c_id,
-                Orders.o_status != OrderStatus.CANCELLED,
-                Orders.o_status != OrderStatus.COMPLETED,
-            )
-            .order_by(Orders.o_created_at.desc())
-        ).first()
+    """Devuelve el pedido activo (no cancelado ni completado) del cliente, si existe.
+
+    Si la consulta falla (DB caída, error transitorio) retorna None para que el
+    agente arranque sin `active_order_id`. Los tools que requieran orden activa
+    fallarán en el siguiente paso con ERROR_INTERNO, que es el contrato correcto.
+    """
+    try:
+        with Session(engine) as session:
+            return session.exec(
+                select(Orders)
+                .where(
+                    Orders.o_c_id == c_id,
+                    Orders.o_status != OrderStatus.CANCELLED,
+                    Orders.o_status != OrderStatus.COMPLETED,
+                )
+                .order_by(Orders.o_created_at.desc())
+            ).first()
+    except Exception as e:
+        logger.error("_get_active_order failed for c_id=%s: %s", c_id, e)
+        return None
 
 
 def _history_tool_calls(history: list) -> set[str]:

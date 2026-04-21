@@ -106,13 +106,15 @@
 ## 🟡 Medias (Data integrity)
 
 ### 6. Robustecer `_get_active_order` en yalti.py
-**Estado:** Pendiente  
+**Estado:** ✅ Completado (2026-04-21)  
 **Effort:** 10 min  
 **Issues:**
 - ❌ Sin manejo de errores en consulta DB
 
 **Aceptación:**
-- Try/except presente
+- Try/except con fallback a `None` (mismo semántico que "no hay orden activa")
+- Log de la excepción para diagnóstico
+- Tests: `tests/test_get_active_order.py` (5/5 ✅)
 
 ---
 
