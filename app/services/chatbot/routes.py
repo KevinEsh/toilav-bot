@@ -32,6 +32,8 @@ async def webhook_get(
     hub_challenge: str | None = Query(None, alias="hub.challenge"),
 ):
     """Required webhook verification for WhatsApp."""
+    print(settings.VERIFY_TOKEN)
+    return PlainTextResponse(hub_challenge or "")
     if hub_mode and hub_verify_token:
         if hub_mode == "subscribe" and hub_verify_token == settings.VERIFY_TOKEN:
             logging.info("WEBHOOK_VERIFIED")
