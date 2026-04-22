@@ -207,20 +207,125 @@ _direct_agent = Agent(
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
+# Máximo de productos a enviar en un mismo turno — evita flood al cliente
+# y respeta el rate limit del Graph API (WhatsApp tolera ráfagas cortas pero
+# 5 mensajes encadenados es el umbral práctico antes de que marquen spam).
+_SHOW_PRODUCTS_CAP = 5
+
+
+def _product_payload(wa_id: str, product: Products) -> dict:
+    """Construye el payload de WhatsApp para un producto.
+
+    Si tiene p_image_url usa `type: "image"` (imagen + caption).
+    Si no, cae a `type: "text"` para no romper el flujo por falta de foto.
+    """
+    price = float(product.p_sale_price)
+    header = f"*{product.p_name}* — ${price:.0f} {product.p_currency}"
+    description = (product.p_description or "").strip()
+    caption = header if not description else f"{header}\n\n{description}"
+
+    if product.p_image_url:
+        return {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": wa_id,
+            "type": "image",
+            "image": {"link": product.p_image_url, "caption": caption},
+        }
+    return {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": wa_id,
+        "type": "text",
+        "text": {"preview_url": False, "body": caption},
+    }
+
+
 @agent.tool(prepare=_hide_when_shown)
 async def show_products(ctx: RunContext[ChatDeps], p_ids: list[int]) -> str:
-    """Envía un carrusel visual de productos al cliente vía WhatsApp.
+    """Envía al cliente una tarjeta visual por cada producto (imagen + precio + nombre).
 
     Cuándo usarla: el cliente quiere explorar opciones ("¿qué tienen?", "¿qué me recomiendas?").
     Cuándo NO: preguntas de detalle sobre un producto específico (responde desde el catálogo)
     o si el cliente ya está armando un pedido. Si falta un dato, usa escalate_to_staff.
 
     Args:
-        p_ids: Lista de p_id de los productos a mostrar (del catálogo).
+        p_ids: Lista de p_id de los productos a mostrar (del catálogo). Máximo 5.
     """
-    ctx.deps._once.add("show_products")
     logger.info("show_products(%s) called for %s", p_ids, ctx.deps.customer.c_whatsapp_id)
-    return "carrusel enviado al cliente"
+
+    if "show_products" in ctx.deps._once:
+        return "Los productos ya fueron enviados. No vuelvas a llamar show_products en este turno."
+
+    # --- Validaciones de entrada (no tocan la red) ---
+    if not p_ids:
+        return "ERROR_VALIDACION: p_ids no puede estar vacío. Selecciona al menos un producto del catálogo."
+
+    # Dedup preservando orden
+    seen: set[int] = set()
+    dedup = [p for p in p_ids if not (p in seen or seen.add(p))]
+
+    valid: list[Products] = []
+    missing: list[int] = []
+    unavailable: list[int] = []
+    for pid in dedup:
+        product = PRODUCTS.get(pid)
+        if product is None:
+            missing.append(pid)
+        elif not product.p_is_available:
+            unavailable.append(pid)
+        else:
+            valid.append(product)
+
+    if not valid:
+        detalles = []
+        if missing:
+            detalles.append(f"no existen en el catálogo: {missing}")
+        if unavailable:
+            detalles.append(f"no están disponibles: {unavailable}")
+        detalle = "; ".join(detalles) if detalles else "ninguno válido"
+        return f"ERROR_VALIDACION: ningún producto válido para mostrar ({detalle})."
+
+    valid = valid[:_SHOW_PRODUCTS_CAP]
+
+    if not settings.WHATSAPP_ACCESS_TOKEN or not settings.PHONE_NUMBER_ID:
+        logger.error("show_products: WhatsApp API credentials missing")
+        return "ERROR_INTERNO: credenciales de WhatsApp no configuradas."
+
+    # --- Envío secuencial — break en el primer error, no reintenta ---
+    wa_id = ctx.deps.customer.c_whatsapp_id
+    c_id = ctx.deps.customer.c_id
+    sent = 0
+    for product in valid:
+        try:
+            await whatsapp_client.post_message(_product_payload(wa_id, product))
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "show_products HTTP %s for p_id=%s c_id=%s: %s",
+                e.response.status_code, product.p_id, c_id, e.response.text,
+            )
+            break
+        except httpx.TimeoutException:
+            logger.error("show_products timeout for p_id=%s c_id=%s", product.p_id, c_id)
+            break
+        except httpx.HTTPError as e:
+            logger.error("show_products network error for p_id=%s c_id=%s: %s", product.p_id, c_id, e)
+            break
+        sent += 1
+
+    if sent == 0:
+        # Nada llegó al cliente — no marcamos _once, el LLM puede reintentar o
+        # decidir responder por texto.
+        return "ERROR_INTERNO: no se pudo enviar el catálogo al cliente. Intenta más tarde."
+
+    ctx.deps._once.add("show_products")
+    if sent < len(valid):
+        logger.warning(
+            "show_products sent %s/%s for c_id=%s (parcial por error HTTP)",
+            sent, len(valid), c_id,
+        )
+        return f"Se enviaron {sent} de {len(valid)} productos al cliente (envío parcial)."
+    return f"Se enviaron {sent} productos al cliente."
 
 
 @agent.tool(prepare=_hide_when_order_exists)

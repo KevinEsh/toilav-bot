@@ -142,14 +142,28 @@
 ---
 
 ### 8. Implementar `show_products` en yalti.py
-**Estado:** Pendiente  
+**Estado:** ✅ Completado (2026-04-21)  
 **Effort:** 30-45 min  
-**Issues:**
-- ❌ Retorna solo dummy implementation
+**Hallazgos durante el fix:**
+- 🔎 **Carousel templates descartado:** requieren Facebook Commerce Catalog configurado + review de Meta. Infra no existente y fuera de alcance inmediato.
+- 🔎 **Image-per-product via Graph API:** usa el `p_image_url` que ya apunta a MinIO. Cero infra nueva, mismo cliente (`whatsapp_client.post_message`) que `escalate_to_staff`.
+- 🔎 **Fallback a texto:** productos sin `p_image_url` no rompen el envío — caen a `type: "text"` con el mismo caption.
+- 🔎 **`_once` asimétrico vs escalate:** aquí se marca **después** del primer envío exitoso (si nada llegó, el LLM puede reintentar). En escalate se marca antes del POST (para no duplicar notificaciones al dueño).
 
-**Aceptación:**
-- Integración real con WhatsApp Carousel API
-- Tests que validen formato
+**Issues corregidos:**
+- ❌ Retorna solo dummy implementation
+- ❌ Sin validación de `p_ids` vacío / duplicados / inexistentes / no disponibles
+- ❌ Sin cap de envíos — riesgo de flood y rate-limit del Graph API
+- ❌ Sin manejo de errores HTTP / timeouts
+
+**Aceptación cumplida:**
+- Envío secuencial por producto via `whatsapp_client.post_message`
+- Cap de 5 productos, dedup preservando orden, filtrado de missing/unavailable
+- Fallback de `type: "image"` a `type: "text"` si no hay `p_image_url`
+- Envío parcial reportado ("Se enviaron X de N productos")
+- Contrato `ERROR_VALIDACION` / `ERROR_INTERNO` respetado
+- Tests: `tests/test_show_products.py` (16/16 ✅)
+- Doc: `fixes/chatbot/funciones/show_products.md`
 
 ---
 
