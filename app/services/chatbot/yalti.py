@@ -79,15 +79,6 @@ async def search_products(ctx: RunContext[ChatDeps], query: str) -> str:
 # ---------------------------------------------------------------------------
 # DB helpers for orders
 # ---------------------------------------------------------------------------
-def _get_or_create_customer(session: Session, wa_id: str, name: str) -> Customers:
-    customer = session.exec(select(Customers).where(Customers.c_whatsapp_id == wa_id)).first()
-    if customer is None:
-        customer = Customers(c_phone=wa_id, c_whatsapp_id=wa_id, c_name=name)
-        session.add(customer)
-        session.flush()
-    return customer
-
-
 def _get_active_order(c_id: int) -> Orders | None:
     """Devuelve el pedido activo (no cancelado ni completado) del cliente, si existe.
 

@@ -183,15 +183,30 @@ _products_cache: _TTLCache[str] = _TTLCache(loader=_fetch_products, ttl=300.0)
 
 
 def _get_or_create_customer(wa_id: str, name: str) -> Customers:
-    """Obtiene o crea el Customer por wa_id. Retorna el objeto en estado detached."""
-    with Session(engine) as session:
-        customer = session.exec(select(Customers).where(Customers.c_whatsapp_id == wa_id)).first()
-        if customer is None:
-            customer = Customers(c_phone=wa_id, c_whatsapp_id=wa_id, c_name=name)
-            session.add(customer)
-            session.commit()
-        session.refresh(customer)
-        return customer
+    """Obtiene o crea el Customer por wa_id. Retorna el objeto en estado detached.
+
+    Raises:
+        ValueError: si `wa_id` viene vacío o solo espacios — evita colisión
+            de clientes distintos contra un registro con `c_whatsapp_id=""`.
+    """
+    if not wa_id or not wa_id.strip():
+        raise ValueError("wa_id vacío — no se puede identificar al cliente")
+    wa_id = wa_id.strip()
+
+    try:
+        with Session(engine) as session:
+            customer = session.exec(
+                select(Customers).where(Customers.c_whatsapp_id == wa_id)
+            ).first()
+            if customer is None:
+                customer = Customers(c_phone=wa_id, c_whatsapp_id=wa_id, c_name=name)
+                session.add(customer)
+                session.commit()
+            session.refresh(customer)
+            return customer
+    except Exception as e:
+        logger.error("_get_or_create_customer failed for wa_id=%s: %s", wa_id, e)
+        raise
 
 
 # ---------------------------------------------------------------------------
