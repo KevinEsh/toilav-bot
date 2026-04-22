@@ -421,32 +421,20 @@ def encapsulate_text_message(recipient: str, text: str) -> dict:
 
 
 async def send_message(data: dict, phone_number_id: str | None = None) -> httpx.Response | None:
-    """Envía un mensaje al API de WhatsApp Cloud."""
-    headers = {
-        "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
-    }
+    """Envía un mensaje al cliente final.
 
-    url = f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}/{phone_number_id}/messages"
+    STUB INTENCIONAL: durante desarrollo no mandamos mensajes reales a clientes
+    para no spammear números reales. El bot imprime el payload a stdout y
+    retorna. Para activar el envío real, delegar en `whatsapp_client.post_message`
+    (igual que `escalate_to_staff`) — el cliente compartido ya maneja
+    URL, headers, timeout y errores.
 
+    Nota: la notificación al dueño (`escalate_to_staff`) sí va al API real,
+    porque durante desarrollo queremos validar que las escalations lleguen al
+    propio teléfono del dev.
+    """
     print("Sending message to WhatsApp API:", data)
-    return
-
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(url, json=data, headers=headers, timeout=10)
-            response.raise_for_status()
-        except httpx.TimeoutException:
-            logging.error("Timeout occurred while sending message")
-            return
-        except httpx.HTTPStatusError as e:
-            logging.error(f"Request failed due to: {e} — body: {e.response.text}")
-            return
-        except httpx.HTTPError as e:
-            logging.error(f"Request failed due to: {e}")
-            return
-        else:
-            log_http_response(response)
-            return response
+    return None
 
 
 def parse_text_for_whatsapp(text: str) -> str:

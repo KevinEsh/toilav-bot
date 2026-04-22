@@ -185,17 +185,15 @@ class TestEscalateHappyPath:
         assert result == "Notificación enviada al dueño de la tienda."
         assert "escalate_to_staff" in ctx.deps._once
 
-    async def test_payload_shape_and_url(self, mock_settings):
+    async def test_payload_shape(self, mock_settings):
+        """URL/headers son responsabilidad de whatsapp_client (ver su test propio).
+        Aquí sólo verificamos que escalate_to_staff arma el payload correcto."""
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
             await escalate_to_staff(ctx, "¿Tienen nueces sin sal?")
 
-        call = client.post.call_args
-        url = call.args[0]
-        assert url == "https://graph.facebook.com/v18.0/phone-123/messages"
-
-        payload = call.kwargs["json"]
+        payload = client.post.call_args.kwargs["json"]
         assert payload["to"] == "5215599999999"
         assert payload["messaging_product"] == "whatsapp"
         assert payload["type"] == "text"
@@ -204,9 +202,6 @@ class TestEscalateHappyPath:
         assert "Juan López" in body
         assert "5215512345678" in body
         assert "¿Tienen nueces sin sal?" in body
-
-        headers = call.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer token-abc"
 
     async def test_message_is_trimmed(self, mock_settings):
         """Espacios alrededor del mensaje no llegan al body."""

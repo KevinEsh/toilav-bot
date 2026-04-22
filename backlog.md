@@ -191,23 +191,26 @@ El `except Exception` en `process_incoming_messages` traga el error pero el mens
 ---
 
 ### 10. Extraer `whatsapp_client.py` — romper ciclo de import
-**Estado:** Pendiente  
+**Estado:** ✅ Completado (2026-04-21)  
 **Origen:** Descubierto durante el fix de `escalate_to_staff` (item #5, 2026-04-20).  
-**Effort:** 45-60 min  
-**Archivos:** `app/services/chatbot/whatsapp_utils.py`, `yalti.py`, nuevo `whatsapp_client.py`
+**Effort:** 45-60 min (real: ~40 min)  
+**Archivos:** `app/services/chatbot/whatsapp_client.py` (nuevo), `yalti.py`, `whatsapp_utils.py`
 
 **Descripción:**
-`yalti.py` necesita llamar a la WhatsApp Graph API (en `escalate_to_staff`, y en el futuro en `show_products`) pero no puede importar `send_message` / `encapsulate_text_message` de `whatsapp_utils.py` porque este último importa de `yalti` — ciclo.
+`yalti.py` necesita llamar a la WhatsApp Graph API pero no podía importar de `whatsapp_utils.py` (ciclo: `whatsapp_utils` importa `yalti`). Se extrajo la mecánica HTTP (URL, headers, POST + `raise_for_status`) a un módulo hoja sin dependencias hacia `yalti`/`whatsapp_utils`.
 
-Hoy `escalate_to_staff` duplica ~15 líneas del POST. Si `show_products` hace lo mismo, son 30+ líneas duplicadas + dos sitios donde cambiar `WHATSAPP_API_VERSION`, headers, timeout.
+**Decisiones clave:**
+- `post_message(payload, timeout=10.0)` **no atrapa** excepciones — las deja propagar al caller para que cada uno decida el mensaje de error específico (el de `escalate_to_staff` distingue timeout para mostrar "(timeout)" al LLM; un futuro `show_products` podría reintentar).
+- `send_message` en `whatsapp_utils.py` **sigue stubbeada** (decisión del dueño para no spammear clientes reales durante desarrollo). Asimetría intencional con `escalate_to_staff` que sí manda real (para validar que las notificaciones llegan al teléfono del dev).
+- Timeout expuesto como argumento — `show_products` con Carousel + imágenes probablemente necesite más de 10s.
 
-**Aceptación:**
-- Nuevo módulo `whatsapp_client.py` con `send_text(wa_id, body)`, `send_interactive(...)` (preparado para Carousel del item #8), sin importar de `yalti` ni de `whatsapp_utils`.
-- `yalti.py::escalate_to_staff` y `whatsapp_utils.py::send_message` delegan en el nuevo módulo.
-- Config se lee de `settings` directamente en el cliente.
-- Tests del cliente aislados.
+**Aceptación cumplida:**
+- Módulo `whatsapp_client.py` sin imports hacia `yalti`/`whatsapp_utils`
+- `escalate_to_staff` delega en el cliente
+- Tests: `tests/test_whatsapp_client.py` (9/9 ✅) + `tests/test_escalate_to_staff.py` sigue (13/13 ✅)
+- Doc: `fixes/chatbot/funciones/whatsapp_client.md`
 
-**Impacto:** no es un bug — pero desbloquea item #8 (show_products usa Carousel) sin más duplicación.
+**Habilita:** item #8 (`show_products` Carousel) — ya tiene cliente compartido donde enganchar el POST sin duplicar nada.
 
 ---
 

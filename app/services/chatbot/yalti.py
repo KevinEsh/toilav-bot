@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, field
 
 import httpx
+import whatsapp_client
 from chatbot_schema import Customers, OrderItems, Orders, OrderStatus, Products, Stores
 from config import settings
 from database import engine
@@ -527,16 +528,9 @@ async def escalate_to_staff(ctx: RunContext[ChatDeps], message: str) -> str:
         "type": "text",
         "text": {"preview_url": False, "body": body},
     }
-    headers = {"Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}"}
-    url = (
-        f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}"
-        f"/{settings.PHONE_NUMBER_ID}/messages"
-    )
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers, timeout=10)
-            response.raise_for_status()
+        await whatsapp_client.post_message(payload)
     except httpx.HTTPStatusError as e:
         logger.error(
             "escalate_to_staff HTTP %s for c_id=%s: %s",
