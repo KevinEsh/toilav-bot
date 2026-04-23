@@ -3,10 +3,11 @@ Database schema for WhatsApp e-commerce chatbot.
 Includes: Users (with address), Products (with details/variants), Orders, Messages, Reviews, FAQ, etc.
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
+from sqlalchemy import Date, DateTime, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import (
     JSON,
@@ -18,6 +19,25 @@ from sqlmodel import (
     Text,
     UniqueConstraint,
 )
+
+
+def created_at_field() -> Any:
+    return Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    )
+
+
+def updated_at_field() -> Any:
+    return Field(
+        default=None,
+        sa_column=Column(
+            DateTime(timezone=True),
+            server_default=text("now()"),
+            onupdate=func.now(),
+            nullable=False,
+        ),
+    )
 
 
 def id_field(table_name: str):
@@ -218,8 +238,8 @@ class Users(SQLModel, table=True):
     u_role: UserRole = Field(default=UserRole.STAFF)
     u_is_active: bool = Field(default=True)
     u_last_login_at: Optional[datetime] = Field(default=None)
-    u_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    u_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    u_created_at: Optional[datetime] = created_at_field()
+    u_updated_at: Optional[datetime] = updated_at_field()
 
 
 # ============================================================================
@@ -255,8 +275,8 @@ class Customers(SQLModel, table=True):
     c_longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
     c_delivery_instructions: Optional[str] = Field(default=None, max_length=500)
     # Timestamps
-    c_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    c_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    c_created_at: Optional[datetime] = created_at_field()
+    c_updated_at: Optional[datetime] = updated_at_field()
 
 
 # ============================================================================
@@ -295,8 +315,8 @@ class Products(SQLModel, table=True):
     p_properties: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     p_rag_text: Optional[str] = Field(default=None, sa_column=Column(Text))
     p_is_available: bool = Field(default=True)
-    p_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    p_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    p_created_at: Optional[datetime] = created_at_field()
+    p_updated_at: Optional[datetime] = updated_at_field()
 
 
 class Stores(SQLModel, table=True):
@@ -320,8 +340,8 @@ class Stores(SQLModel, table=True):
     s_rag_text: Optional[str] = Field(default=None, sa_column=Column(Text))
     s_longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
     s_latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
-    s_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    s_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    s_created_at: Optional[datetime] = created_at_field()
+    s_updated_at: Optional[datetime] = updated_at_field()
 
 
 class Sales(SQLModel, table=True):
@@ -342,10 +362,10 @@ class Sales(SQLModel, table=True):
     sa_id: Optional[int] = id_field("sales")
     sa_p_id: int = Field(foreign_key="products.p_id")
     sa_s_id: int = Field(foreign_key="stores.s_id", index=True)
-    sa_date: date = Field(default_factory=date.today)
+    sa_date: date = Field(default=None, sa_column=Column(Date, nullable=False))
     sa_units_sold: int = Field(ge=0)
-    sa_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    sa_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    sa_created_at: Optional[datetime] = created_at_field()
+    sa_updated_at: Optional[datetime] = updated_at_field()
 
 
 class Stocks(SQLModel, table=True):
@@ -366,10 +386,12 @@ class Stocks(SQLModel, table=True):
     st_id: Optional[int] = id_field("stocks")
     st_p_id: int = Field(foreign_key="products.p_id")
     st_s_id: int = Field(foreign_key="stores.s_id")
-    st_datetime: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    st_datetime: datetime = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
     st_units: int = Field(ge=0)
-    st_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    st_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    st_created_at: Optional[datetime] = created_at_field()
+    st_updated_at: Optional[datetime] = updated_at_field()
 
 
 # ============================================================================
@@ -431,8 +453,8 @@ class Orders(SQLModel, table=True):
     o_cancelled_at: Optional[datetime] = Field(default=None)
     o_cancel_reason: Optional[CancelReason] = Field(default=None)
     # Timestamps
-    o_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    o_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    o_created_at: Optional[datetime] = created_at_field()
+    o_updated_at: Optional[datetime] = updated_at_field()
 
 
 class OrderItems(SQLModel, table=True):
@@ -459,8 +481,8 @@ class OrderItems(SQLModel, table=True):
     oi_discount_amount: Optional[float] = Field(
         default=None, ge=0.0, sa_column=Column(Numeric(10, 2))
     )
-    oi_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    oi_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    oi_created_at: Optional[datetime] = created_at_field()
+    oi_updated_at: Optional[datetime] = updated_at_field()
 
 
 class OrderStatusHistory(SQLModel, table=True):
@@ -478,8 +500,8 @@ class OrderStatusHistory(SQLModel, table=True):
     osh_id: int = id_field("orderstatushistory")
     osh_o_id: int = Field(foreign_key="orders.o_id", index=True)
     osh_status: OrderStatus = Field(default=OrderStatus.CONSUMER_REVIEWING)
-    osh_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    osh_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    osh_created_at: Optional[datetime] = created_at_field()
+    osh_updated_at: Optional[datetime] = updated_at_field()
 
 
 # ============================================================================
@@ -510,8 +532,8 @@ class Conversations(SQLModel, table=True):
     cv_phase: ConversationPhase = Field(default=ConversationPhase.GREETING)
     cv_mode: ConversationMode = Field(default=ConversationMode.BOT)
     cv_history: list = Field(default_factory=list, sa_column=Column(JSONB))
-    cv_started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    cv_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    cv_started_at: Optional[datetime] = created_at_field()
+    cv_updated_at: Optional[datetime] = updated_at_field()
 
 
 class Messages(SQLModel, table=True):
@@ -540,7 +562,7 @@ class Messages(SQLModel, table=True):
     m_context_message_id: Optional[str] = Field(default=None, max_length=100)
     m_error_code: Optional[str] = Field(default=None, max_length=50)
     m_error_message: Optional[str] = Field(default=None, max_length=500)
-    m_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    m_created_at: Optional[datetime] = created_at_field()
 
 
 class MessageTemplates(SQLModel, table=True):
@@ -568,8 +590,8 @@ class MessageTemplates(SQLModel, table=True):
     # mt_buttons: Optional[list] = Field(default=None, sa_column=Column(JSON))
     # mt_status: str = Field(default="pending", max_length=20)
     # mt_whatsapp_template_id: Optional[str] = Field(default=None, max_length=100)
-    mt_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    mt_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    mt_created_at: Optional[datetime] = created_at_field()
+    mt_updated_at: Optional[datetime] = updated_at_field()
 
 
 # ============================================================================
@@ -615,7 +637,7 @@ class MessageTemplates(SQLModel, table=True):
 #     pr_images: Optional[list] = Field(default=None, sa_column=Column(JSON))
 #     pr_is_verified_purchase: bool = Field(default=False)
 #     pr_is_approved: bool = Field(default=False)
-#     pr_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     pr_created_at: Optional[datetime] = created_at_field()
 
 
 # class BotFeedback(SQLModel, table=True):
@@ -637,7 +659,7 @@ class MessageTemplates(SQLModel, table=True):
 #     bf_m_id: int = Field(foreign_key="messages.m_id", index=True)
 #     bf_u_id: int = Field(foreign_key="users.u_id")
 #     bf_was_helpful: Optional[bool] = Field(default=None)
-#     bf_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     bf_created_at: Optional[datetime] = created_at_field()
 
 
 # ============================================================================
@@ -671,8 +693,8 @@ class FAQItems(SQLModel, table=True):
     faq_display_order: int = Field(default=0)
     faq_view_count: int = Field(default=0)
     faq_is_active: bool = Field(default=True)
-    faq_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    faq_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    faq_created_at: Optional[datetime] = created_at_field()
+    faq_updated_at: Optional[datetime] = updated_at_field()
 
 
 # ============================================================================
@@ -706,7 +728,7 @@ class FAQItems(SQLModel, table=True):
 # n_sent_via_whatsapp: bool = Field(default=False)
 # n_whatsapp_message_id: Optional[str] = Field(default=None, max_length=100)
 # n_sent_at: Optional[datetime] = Field(default=None)
-# n_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+# n_created_at: Optional[datetime] = created_at_field()
 
 
 # ============================================================================
@@ -737,7 +759,7 @@ class FAQItems(SQLModel, table=True):
 #     ss_key: str = Field(max_length=100, index=True) #cual es la diferencia con key?
 #     ss_value: Optional[str] = Field(default=None, sa_column=Column(Text))
 #     ss_description: Optional[str] = Field(default=None, max_length=500)
-#     ss_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     ss_updated_at: Optional[datetime] = updated_at_field()
 
 
 # class BusinessHours(SQLModel, table=True):
@@ -839,8 +861,8 @@ class FAQItems(SQLModel, table=True):
 #     d_signature_url: Optional[str] = Field(default=None, max_length=500)
 #     d_latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
 #     d_longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
-#     d_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-#     d_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     d_created_at: Optional[datetime] = created_at_field()
+#     d_updated_at: Optional[datetime] = updated_at_field()
 
 
 # ============================================================================
@@ -881,7 +903,7 @@ class FAQItems(SQLModel, table=True):
 #     ba_avg_response_time_ms: Optional[float] = Field(default=None, ge=0.0)
 #     ba_escalation_rate: Optional[float] = Field(default=None, ge=0.0, le=100.0)
 #     ba_satisfaction_score: Optional[float] = Field(default=None, ge=0.0, le=5.0)
-#     ba_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     ba_created_at: Optional[datetime] = created_at_field()
 
 
 # class AuditLog(SQLModel, table=True):
@@ -910,7 +932,7 @@ class FAQItems(SQLModel, table=True):
 #     al_actor_id: Optional[str] = Field(default=None, max_length=50)
 #     al_ip_address: Optional[str] = Field(default=None, max_length=45)
 #     al_user_agent: Optional[str] = Field(default=None, max_length=500)
-#     al_created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+#     al_created_at: Optional[datetime] = created_at_field()
 
 
 # ============================================================================
