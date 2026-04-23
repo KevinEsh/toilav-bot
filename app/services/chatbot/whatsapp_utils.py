@@ -21,6 +21,7 @@ from config import settings
 from database import engine
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_core import to_jsonable_python
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 import yalti
 from yalti import StoreInfo, agent_generate_response
@@ -185,6 +186,11 @@ _products_cache: _TTLCache[str] = _TTLCache(loader=_fetch_products, ttl=300.0)
 def _get_or_create_customer(wa_id: str, name: str) -> Customers:
     """Obtiene o crea el Customer por wa_id. Retorna el objeto en estado detached.
 
+    Si dos requests concurrentes del mismo wa_id nuevo pisan el SELECT inicial,
+    el segundo commit lanza `IntegrityError` (constraint único de c_whatsapp_id).
+    Se hace rollback + re-SELECT para devolver el registro creado por el ganador
+    de la carrera, en vez de perder el mensaje del request perdedor.
+
     Raises:
         ValueError: si `wa_id` viene vacío o solo espacios — evita colisión
             de clientes distintos contra un registro con `c_whatsapp_id=""`.
@@ -201,7 +207,19 @@ def _get_or_create_customer(wa_id: str, name: str) -> Customers:
             if customer is None:
                 customer = Customers(c_phone=wa_id, c_whatsapp_id=wa_id, c_name=name)
                 session.add(customer)
-                session.commit()
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    logger.info(
+                        "_get_or_create_customer race for wa_id=%s — re-selecting winner",
+                        wa_id,
+                    )
+                    customer = session.exec(
+                        select(Customers).where(Customers.c_whatsapp_id == wa_id)
+                    ).first()
+                    if customer is None:
+                        raise
             session.refresh(customer)
             return customer
     except Exception as e:

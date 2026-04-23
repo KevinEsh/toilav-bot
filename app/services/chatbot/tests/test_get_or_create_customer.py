@@ -15,7 +15,7 @@ for _p in [_chatbot_dir, _db_dir]:
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from whatsapp_utils import _get_or_create_customer
 
@@ -98,11 +98,57 @@ class TestGetOrCreateCustomerErrorHandling:
                 _get_or_create_customer("5215512345678", "Juan")
 
     def test_db_error_on_commit_reraises(self):
-        """Falla en commit (p. ej. IntegrityError por race) se propaga al caller."""
+        """Falla en commit distinta a IntegrityError se propaga al caller."""
         session = _make_session(
             first_return=None,
             commit_side_effect=OperationalError("stmt", {}, Exception("commit failed")),
         )
         with patch("whatsapp_utils.Session", return_value=session):
             with pytest.raises(OperationalError):
+                _get_or_create_customer("5215512345678", "Juan")
+
+
+# ---------------------------------------------------------------------------
+# Race condition — concurrent first-contact creates
+# ---------------------------------------------------------------------------
+
+class TestGetOrCreateCustomerRace:
+
+    def test_integrity_error_triggers_reselect_and_returns_winner(self):
+        """SELECT(None) + commit(IntegrityError) → rollback + re-SELECT devuelve al ganador."""
+        winner = MagicMock(c_id=42, c_whatsapp_id="5215512345678")
+        first_result = MagicMock()
+        first_result.first.return_value = None
+        reselect_result = MagicMock()
+        reselect_result.first.return_value = winner
+
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        session.exec.side_effect = [first_result, reselect_result]
+        session.commit.side_effect = IntegrityError("stmt", {}, Exception("duplicate key"))
+
+        with patch("whatsapp_utils.Session", return_value=session):
+            result = _get_or_create_customer("5215512345678", "Juan")
+
+        assert result is winner
+        session.rollback.assert_called_once()
+        assert session.exec.call_count == 2
+
+    def test_integrity_error_with_empty_reselect_reraises(self):
+        """Si el re-SELECT no encuentra el registro (IntegrityError no era por race),
+        re-raise el IntegrityError original para no tragar el error."""
+        first_result = MagicMock()
+        first_result.first.return_value = None
+        reselect_result = MagicMock()
+        reselect_result.first.return_value = None
+
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=False)
+        session.exec.side_effect = [first_result, reselect_result]
+        session.commit.side_effect = IntegrityError("stmt", {}, Exception("other constraint"))
+
+        with patch("whatsapp_utils.Session", return_value=session):
+            with pytest.raises(IntegrityError):
                 _get_or_create_customer("5215512345678", "Juan")

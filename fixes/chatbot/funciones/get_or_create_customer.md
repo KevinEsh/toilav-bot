@@ -1,8 +1,8 @@
 # Fix: _get_or_create_customer
 
-**Fecha:** 2026-04-21
+**Fecha:** 2026-04-21 (hardening inicial) — 2026-04-23 (race handling)
 **Archivo:** `app/services/chatbot/whatsapp_utils.py`
-**Tests:** `app/services/chatbot/tests/test_get_or_create_customer.py` (8/8 ✅)
+**Tests:** `app/services/chatbot/tests/test_get_or_create_customer.py` (10/10 ✅)
 
 ---
 
@@ -90,20 +90,48 @@ webhook peor — el caller piensa que todo fue bien pero `customer` sería
 
 ---
 
-## Fuera de alcance: race condition en creación concurrente
+## Race handling (agregado 2026-04-23 — item #9)
 
-Dos mensajes simultáneos del mismo `wa_id` nuevo → ambos leen `first()==None`,
-ambos `add+commit` → el segundo truena con `IntegrityError` por constraint
-único en `c_whatsapp_id`. Hoy el `except Exception` en el caller lo traga,
-pero uno de los mensajes se pierde sin respuesta.
+Dos mensajes simultáneos del mismo `wa_id` nuevo caían en un race:
+ambos leen `first()==None`, ambos `add+commit` → el segundo truena con
+`IntegrityError` por constraint único en `c_whatsapp_id`. El
+`except Exception` del caller tragaba el error y el mensaje del
+perdedor se perdía sin respuesta.
 
-Arreglo real: retry con `SELECT ... FOR UPDATE` o `except IntegrityError:
-re-select + use existing`. Es más invasivo que este pass — lo dejé como
-nuevo item en `backlog.md`.
+### Fix elegido: `except IntegrityError → rollback → re-SELECT`
+
+```python
+try:
+    session.commit()
+except IntegrityError:
+    session.rollback()
+    customer = session.exec(
+        select(Customers).where(Customers.c_whatsapp_id == wa_id)
+    ).first()
+    if customer is None:
+        raise
+```
+
+Descartamos `SELECT ... FOR UPDATE`: requiere pesimismo en el caso
+común (~0% de races) y no funciona igual en todos los engines. El
+patrón rollback+re-SELECT es optimista — sólo paga costo cuando la
+race efectivamente ocurre.
+
+### Defensa: `if customer is None: raise`
+
+Si el re-SELECT devuelve `None`, el `IntegrityError` **no** fue por la
+race que nos interesa (podría ser otra constraint futura). Re-raise
+en vez de silenciar — el outer `except Exception` loguea con wa_id.
+
+### Por qué no tocamos el `OperationalError` del commit
+
+El test `test_db_error_on_commit_reraises` sigue pasando porque
+`OperationalError` no es subclase de `IntegrityError` — cae directo al
+outer handler, comportamiento preservado.
 
 ---
 
-## Tests — `tests/test_get_or_create_customer.py` (8/8 ✅)
+## Tests — `tests/test_get_or_create_customer.py` (10/10 ✅)
 
 ### Validación
 - [x] `test_empty_wa_id_raises` — `""` → ValueError
@@ -118,3 +146,7 @@ nuevo item en `backlog.md`.
 ### Errores
 - [x] `test_db_error_on_select_reraises_with_log` — `OperationalError` en select → re-raise
 - [x] `test_db_error_on_commit_reraises` — `OperationalError` en commit → re-raise
+
+### Race condition
+- [x] `test_integrity_error_triggers_reselect_and_returns_winner` — commit falla con IntegrityError → rollback + re-SELECT devuelve al ganador
+- [x] `test_integrity_error_with_empty_reselect_reraises` — re-SELECT vacío (IntegrityError no era por race) → re-raise

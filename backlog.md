@@ -181,9 +181,9 @@ Agregar tests en `app/services/chatbot/tests/` para:
 ## 🆕 Items descubiertos durante el hardening
 
 ### 9. Race condition en `_get_or_create_customer`
-**Estado:** Pendiente  
+**Estado:** ✅ Completado (2026-04-23)  
 **Origen:** Descubierto durante el fix del item #7 (2026-04-21).  
-**Effort:** 30-45 min  
+**Effort:** 30-45 min (real: ~20 min)  
 **Archivo:** `app/services/chatbot/whatsapp_utils.py`
 
 **Descripción:**
@@ -195,12 +195,13 @@ Dos mensajes simultáneos del mismo cliente **nuevo** (primer contacto) disparan
 
 El `except Exception` en `process_incoming_messages` traga el error pero el mensaje del request B **se pierde sin respuesta al cliente**.
 
-**Aceptación:**
-- `except IntegrityError` específico que haga re-SELECT y use el registro ya creado por el otro request.
-- Test que simule el race (concurrencia con threads o mock de `commit()` que la primera vez crashee con `IntegrityError`).
-- Documentar en `fixes/chatbot/funciones/get_or_create_customer.md`.
+**Aceptación cumplida:**
+- `except IntegrityError` específico con rollback + re-SELECT que devuelve al ganador
+- Defensa: si el re-SELECT devuelve `None` (IntegrityError no era por race) se re-raise en vez de silenciar
+- Tests: `tests/test_get_or_create_customer.py` (10/10 ✅) — 2 nuevos para el path de race
+- Doc: `fixes/chatbot/funciones/get_or_create_customer.md` sección "Race handling"
 
-**Impacto:** bajo (requiere clientes nuevos que manden ≥2 mensajes simultáneos en el debounce window de 5s). Pero el bug corrompe silenciosamente la experiencia del primer contacto.
+**Impacto:** bajo (requiere clientes nuevos que manden ≥2 mensajes simultáneos en el debounce window de 5s). Pero el bug corrompía silenciosamente la experiencia del primer contacto.
 
 ---
 
@@ -232,4 +233,4 @@ El `except Exception` en `process_incoming_messages` traga el error pero el mens
 
 - **Modelos a usar:** Sonnet 4.6 (mejor análisis de seguridad vs Haiku, más eficiente que Opus)
 - **Rama:** `agustin/deploy/update_order`
-- **Base de datos:** SQLModel + PostgreSQL (validar integridad referencial)
+- **Base de datos:** SQLModel + PostgreSQL (validar integridad referencial
