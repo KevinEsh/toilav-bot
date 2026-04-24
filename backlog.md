@@ -229,6 +229,33 @@ El `except Exception` en `process_incoming_messages` traga el error pero el mens
 
 ---
 
+## 🚀 Pasos para terminar de dockerizar servicio chatbot
+
+**Estado:** En progreso (service agregado comentado en `docker-compose.yml` el 2026-04-23)
+**Effort total:** 45-60 min
+
+### 1. Desbloquear seguridad (15 min) — bloqueante para exponer a internet
+Bugs documentados en `fixes/chatbot/tests/tech_debt.md`:
+- [x] Borrar `return` temprano en `security.py:24` → habilita validación HMAC
+- [ ] Borrar `return PlainTextResponse(...)` en `routes.py:36` → habilita verify token check
+- [x] Borrar `print(settings.APP_SECRET)` en `security.py:11` (leak a stdout)
+- [ ] Borrar `print(settings.VERIFY_TOKEN)` en `routes.py:35` (leak a stdout)
+- [ ] Quitar marker `@_PROD_BYPASS` de los 6 tests en `test_routes.py`
+
+### 2. Descomentar service en `docker-compose.yml` (5 min)
+- Bloque agregado comentado justo después de `frontend`
+- Al descomentar levanta con `POSTGRES_HOST=database-engine`, healthcheck a `/health`, `depends_on: database-engine (healthy)`
+
+### 3. Activar `send_message` real (5 min)
+- Hoy está stub en `whatsapp_utils.py` (decisión previa para no spammear clientes en dev)
+- Para prod tiene que delegar en `whatsapp_client.post_message`
+
+### Deuda tolerable para MVP (documentar, no bloquea)
+- Estado in-memory (`_user_buffers`, `_HistoryCache`, `_TTLCache`) → limita a 1 réplica. Aceptable para lanzamiento.
+- `VERIFY_TOKEN` lee de env var `NGROK_VERIFY_TOKEN` — renombrar o configurar la env var con ese nombre en prod.
+
+---
+
 ## Notas
 
 - **Modelos a usar:** Sonnet 4.6 (mejor análisis de seguridad vs Haiku, más eficiente que Opus)

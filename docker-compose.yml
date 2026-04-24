@@ -118,6 +118,30 @@ services:
       - api
     networks:
       - toilav-network
+
+  # chatbot:
+  #   build:
+  #     context: ./app/services/chatbot
+  #     dockerfile: Dockerfile
+  #   container_name: toilav-chatbot
+  #   restart: always
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     - POSTGRES_HOST=database-engine
+  #   ports:
+  #     - "8001:8001"
+  #   depends_on:
+  #     database-engine:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health').read()"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+  #   networks:
+  #     - toilav-network
+
 volumes:
   database-engine-volume:
   pgadmin-volume:
