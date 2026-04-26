@@ -267,8 +267,8 @@ class Customers(SQLModel, table=True):
     """
 
     c_id: int = id_field("customers")
-    c_phone: str = Field(unique=True, index=True, max_length=20)
-    c_whatsapp_id: str = Field(default=None, max_length=50, unique=True)
+    c_whatsapp_id: str = Field(index=True, unique=True, max_length=50)
+    c_phone: str = Field(index=True, unique=True, max_length=20)
     c_name: Optional[str] = Field(default=None, max_length=100)
     c_status: CustomerStatus = Field(default=CustomerStatus.ACTIVE)
     c_latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
