@@ -5,29 +5,28 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 import httpx
-from chatbot_schema import Customers, OrderItems, Orders, OrderStatus, Products, Stores
+import whatsapp_client
 from config import settings
 from database import get_session
+from dbutils import load_orderitem
 from models import CustomerRow, ProductRow, StoreRow
 from pydantic_ai import Agent, ModelSettings, RunContext
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import UsageLimits
+from queries import insert_bulk_orderitems_query, insert_order_query
 from rules import ChatOutput, build_mega_prompt
-from sqlalchemy import column, insert, table, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
-
-# Populated by whatsapp_utils._fetch_products() each time the catalog is loaded.
-PRODUCTS: dict[int, ProductRow] = {}
 
 
 async def _send_whatsapp_text(to: str, body: str) -> bool:
     """Sends a plain WhatsApp text message. Returns True on success, logs and returns False on error."""
     if not settings.WHATSAPP_ACCESS_TOKEN or not settings.PHONE_NUMBER_ID:
-        logger.error("_send_whatsapp_text: WhatsApp credentials not configured")
+        logger.error(f"_send_whatsapp_text[{to=}]: WhatsApp credentials not configured")
         return False
     payload = {
         "messaging_product": "whatsapp",
@@ -48,29 +47,13 @@ async def _send_whatsapp_text(to: str, body: str) -> bool:
         return True
     except httpx.HTTPStatusError as e:
         logger.error(
-            "_send_whatsapp_text HTTP %s to %s: %s",
-            e.response.status_code,
-            to,
-            e.response.text,
+            f"_send_whatsapp_text[{to=}]: HTTP {e.response.status_code} — {e.response.text}"
         )
     except httpx.TimeoutException:
-        logger.error("_send_whatsapp_text timeout to %s", to)
+        logger.error(f"_send_whatsapp_text[{to=}]: timeout")
     except httpx.HTTPError as e:
-        logger.error("_send_whatsapp_text network error to %s: %s", to, e)
+        logger.error(f"_send_whatsapp_text[{to=}]: network error — {e}")
     return False
-
-
-# ---------------------------------------------------------------------------
-# Store and conversation dependencies
-# ---------------------------------------------------------------------------
-@dataclass
-class StoreInfo:
-    """Store information loaded from DB."""
-
-    s_id: int
-    name: str
-    description: str
-    properties: dict
 
 
 @dataclass
@@ -83,63 +66,6 @@ class ChatDeps:
     session: AsyncSession  # shared session for the duration of the agent run
     active_order_id: int | None = None  # pre-loaded; tools write back here after create_order
     _once: set[str] = field(default_factory=set)  # tools allowed only once per run
-
-
-# ---------------------------------------------------------------------------
-# Dummy product catalog — kept for local testing without DB products.
-# NOT registered as an agent tool; use the system prompt catalog instead.
-# ---------------------------------------------------------------------------
-_DUMMY_PRODUCTS = """\
-Productos disponibles en Tremenda Nuez:
-
-• Almendras tostadas — $120/200g, $220/500g
-• Nueces de la india (cashews) — $85/100g, $160/200g
-• Nueces de Castilla — $75/150g
-• Pistaches con sal — $95/100g
-• Arándanos deshidratados — $65/100g
-• Mix de frutos secos (almendras + nueces + arándanos) — $130/200g
-
-Métodos de pago: transferencia bancaria, efectivo al recibir.
-Zonas de entrega: ciudad de Guanajuato y área metropolitana.
-Tiempo de entrega: 24–48 horas hábiles.
-Pedido mínimo: $150.
-"""
-
-
-async def search_products(ctx: RunContext[ChatDeps], query: str) -> str:
-    """Búsqueda de productos — deshabilitado, el catálogo ya está en el system prompt.
-
-    Args:
-        query: La pregunta o tema a buscar.
-    """
-    logger.info("Product search from %s: %s", ctx.deps.wa_id, query)
-    return _DUMMY_PRODUCTS
-
-
-# ---------------------------------------------------------------------------
-# DB helpers for orders
-# ---------------------------------------------------------------------------
-def _get_or_create_customer(session: Session, wa_id: str, name: str) -> Customers:
-    customer = session.exec(select(Customers).where(Customers.c_whatsapp_id == wa_id)).first()
-    if customer is None:
-        customer = Customers(c_phone=wa_id, c_whatsapp_id=wa_id, c_name=name)
-        session.add(customer)
-        session.flush()
-    return customer
-
-
-def _get_active_order(c_id: int) -> Orders | None:
-    """Devuelve el pedido activo (no cancelado ni completado) del cliente, si existe."""
-    with Session(engine) as session:
-        return session.exec(
-            select(Orders)
-            .where(
-                Orders.o_c_id == c_id,
-                Orders.o_status != OrderStatus.CANCELLED,
-                Orders.o_status != OrderStatus.COMPLETED,
-            )
-            .order_by(Orders.o_created_at.desc())
-        ).first()
 
 
 def _history_tool_calls(history: list) -> set[str]:
@@ -157,7 +83,8 @@ async def order_summary(session: AsyncSession, o_id: int, c_name: str) -> str:
     """Consulta la DB y construye el resumen del pedido."""
 
     get_order_summary_query = text("""
-        SELECT o_total, o_subtotal, o_customer_notes, p_name, oi_units, oi_units * oi_unit_price as p_subtotal
+        SELECT o_total, o_subtotal, o_customer_notes, p_name,
+            oi_units, oi_units * oi_unit_price as p_subtotal
         FROM orderitems
         JOIN orders on o_id = oi_o_id
         JOIN products on p_id = oi_p_id
@@ -234,14 +161,14 @@ _direct_agent = Agent(
 _SHOW_PRODUCTS_CAP = 5
 
 
-def _product_payload(wa_id: str, product: Products) -> dict:
+def _product_payload(wa_id: str, product: ProductRow) -> dict:
     """Construye el payload de WhatsApp para un producto.
 
     Si tiene p_image_url usa `type: "image"` (imagen + caption).
     Si no, cae a `type: "text"` para no romper el flujo por falta de foto.
     """
-    price = float(product.p_sale_price)
-    header = f"*{product.p_name}* — ${price:.0f} {product.p_currency}"
+    price = str(product.p_sale_price)
+    header = f"*{product.p_name}* — ${price} {product.p_currency}"
     description = (product.p_description or "").strip()
     caption = header if not description else f"{header}\n\n{description}"
 
@@ -273,7 +200,9 @@ async def show_products(ctx: RunContext[ChatDeps], p_ids: list[int]) -> str:
     Args:
         p_ids: Lista de p_id de los productos a mostrar (del catálogo). Máximo 5.
     """
-    logger.info("show_products(%s) called for %s", p_ids, ctx.deps.customer.c_whatsapp_id)
+    c_id = ctx.deps.customer.c_id
+    wa_id = ctx.deps.customer.c_whatsapp_id
+    logger.info(f"show_products[{c_id=}]: llamado con {p_ids=}")
 
     if "show_products" in ctx.deps._once:
         return "Los productos ya fueron enviados. No vuelvas a llamar show_products en este turno."
@@ -282,60 +211,30 @@ async def show_products(ctx: RunContext[ChatDeps], p_ids: list[int]) -> str:
     if not p_ids:
         return "ERROR_VALIDACION: p_ids no puede estar vacío. Selecciona al menos un producto del catálogo."
 
-    # Dedup preservando orden
-    seen: set[int] = set()
-    dedup = [p for p in p_ids if not (p in seen or seen.add(p))]
+    catalog = ctx.deps.products
 
-    valid: list[Products] = []
-    missing: list[int] = []
-    unavailable: list[int] = []
-    for pid in dedup:
-        product = PRODUCTS.get(pid)
-        if product is None:
-            missing.append(pid)
-        elif not product.p_is_available:
-            unavailable.append(pid)
-        else:
-            valid.append(product)
+    invalid_ids = [pid for pid in p_ids if pid not in catalog]
+    if invalid_ids:
+        return f"ERROR_VALIDACION: los p_ids {invalid_ids} no existen en el catálogo. Usa solo ids del catálogo disponible."
 
-    if not valid:
-        detalles = []
-        if missing:
-            detalles.append(f"no existen en el catálogo: {missing}")
-        if unavailable:
-            detalles.append(f"no están disponibles: {unavailable}")
-        detalle = "; ".join(detalles) if detalles else "ninguno válido"
-        return f"ERROR_VALIDACION: ningún producto válido para mostrar ({detalle})."
-
-    valid = valid[:_SHOW_PRODUCTS_CAP]
-
-    if not settings.WHATSAPP_ACCESS_TOKEN or not settings.PHONE_NUMBER_ID:
-        logger.error("show_products: WhatsApp API credentials missing")
-        return "ERROR_INTERNO: credenciales de WhatsApp no configuradas."
+    valid = [catalog[pid] for pid in set(p_ids)][:_SHOW_PRODUCTS_CAP]
 
     # --- Envío secuencial — break en el primer error, no reintenta ---
-    wa_id = ctx.deps.customer.c_whatsapp_id
-    c_id = ctx.deps.customer.c_id
     sent = 0
     for product in valid:
+        p_id = product.p_id
         try:
             await whatsapp_client.post_message(_product_payload(wa_id, product))
         except httpx.HTTPStatusError as e:
             logger.error(
-                "show_products HTTP %s for p_id=%s c_id=%s: %s",
-                e.response.status_code,
-                product.p_id,
-                c_id,
-                e.response.text,
+                f"show_products[{c_id=}, {p_id=}]: HTTP {e.response.status_code} — {e.response.text}"
             )
             break
         except httpx.TimeoutException:
-            logger.error("show_products timeout for p_id=%s c_id=%s", product.p_id, c_id)
+            logger.error(f"show_products[{c_id=}, {p_id=}]: timeout")
             break
         except httpx.HTTPError as e:
-            logger.error(
-                "show_products network error for p_id=%s c_id=%s: %s", product.p_id, c_id, e
-            )
+            logger.error(f"show_products[{c_id=}, {p_id=}]: network error — {e}")
             break
         sent += 1
 
@@ -346,12 +245,7 @@ async def show_products(ctx: RunContext[ChatDeps], p_ids: list[int]) -> str:
 
     ctx.deps._once.add("show_products")
     if sent < len(valid):
-        logger.warning(
-            "show_products sent %s/%s for c_id=%s (parcial por error HTTP)",
-            sent,
-            len(valid),
-            c_id,
-        )
+        logger.warning(f"show_products[{c_id=}]: envío parcial {sent}/{len(valid)}")
         return f"Se enviaron {sent} de {len(valid)} productos al cliente (envío parcial)."
     return f"Se enviaron {sent} productos al cliente."
 
@@ -382,57 +276,47 @@ async def create_order(
         delivery_address: Dirección de entrega dada por el cliente. OBLIGATORIO — nunca inferir ni inventar.
         delivery_instructions: Instrucciones especiales para la entrega. Puede ser cadena vacía si el cliente no tiene.
     """
-    logger.info(f"create_order({items=}, {delivery_address=}, {delivery_instructions=})")
+    products = ctx.deps.products
+    c_id = ctx.deps.customer.c_id
+    logger.info(f"create_order[{c_id=}]: {items=}, {delivery_address=}, {delivery_instructions=}")
 
     # --- Validaciones de entrada (no tocan la DB) ---
     if not items:
-        logger.warning("")
+        logger.warning(f"create_order[{c_id=}]: items vacío")
         return "ERROR_VALIDACION: items está vacío. Pide al cliente que especifique qué productos quiere."
 
     if not delivery_address or not delivery_address.strip():
+        logger.warning(f"create_order[{c_id=}]: delivery_address vacía")
         return "ERROR_VALIDACION: delivery_address es obligatoria. Pide al cliente su dirección de entrega."
 
-    logger.info("create_order: products size=%d", len(ctx.deps.products))
+    logger.info(f"create_order[{c_id=}]: iniciando validación de parámetros")
 
     errors = []
     for i, item in enumerate(items):
         if not isinstance(item, dict):
-            errors.append(f"Ítem {i}: debe ser un dict con p_id y units.")
+            errors.append(f"items[{i}]: debe ser un dict con p_id y units.")
             continue
         if "p_id" not in item or "units" not in item:
-            errors.append(f"Ítem {i}: faltan campos 'p_id' o 'units'.")
+            errors.append(f"items[{i}]: faltan campos 'p_id' o 'units'.")
             continue
-        logger.info(
-            "create_order: validando ítem %d — p_id=%r units=%r in_PRODUCTS=%s",
-            i,
-            item["p_id"],
-            item.get("units"),
-            item["p_id"] in PRODUCTS,
-        )
+
         if item["p_id"] not in ctx.deps.products:
-            errors.append(f"Ítem {i}: p_id={item['p_id']} no existe en el catálogo.")
+            errors.append(f"items[{i}]: p_id={item['p_id']} no existe en el catálogo.")
         if not isinstance(item["units"], int) or item["units"] < 1:
             errors.append(
-                f"Ítem {i} (p_id={item.get('p_id')}): units debe ser un entero >= 1, recibido: {item.get('units')}."
+                f"items[{i}] (p_id={item.get('p_id')}): units debe ser un entero >= 1, recibido: {item.get('units')}."
             )
 
     if errors:
-        logger.warning("create_order: errores de validación — %s", errors)
+        logger.warning(f"create_order[{c_id=}]: errores de validación — {errors}")
         return "ERROR_VALIDACION:\n" + "\n".join(f"- {e}" for e in errors)
 
-    logger.info("create_order: validaciones OK, procediendo a DB")
+    logger.info(f"create_order[{c_id=}]: validaciones OK, procediendo a DB")
 
-    products = ctx.deps.products
     # --- Escritura a DB ---
     try:
         session = ctx.deps.session
         notes = f"Dirección: {delivery_address.strip()} | Instrucciones: {delivery_instructions.strip()}"
-
-        insert_order_query = text("""
-            INSERT INTO orders (o_c_id, o_s_id, o_status, o_customer_notes, o_subtotal, o_shipping_amount, o_total, o_currency)
-            VALUES (:o_c_id, :o_s_id, :o_status, :o_customer_notes, 0, :o_shipping_amount, 0, :o_currency)
-            RETURNING o_id
-        """)
 
         query_args = {
             "o_c_id": ctx.deps.customer.c_id,
@@ -443,56 +327,39 @@ async def create_order(
             "o_currency": "MXN",
         }
 
-        logger.info("Inserting Order in DB")
-
+        logger.info(f"create_order[{c_id=}]: insertando order")
         order_res = await session.execute(insert_order_query, query_args)
         o_id = order_res.scalar()
+        logger.info(f"create_order[{c_id=}]: inserción retornó {o_id=}")
 
-        logger.info(
-            "create_order: RETURNING o_id=%r (None indica fallo silencioso del INSERT)", o_id
-        )
         if o_id is None:
-            logger.error(
-                "create_order: o_id es None tras el INSERT — revisar enum o_status o FK c_id/s_id"
-            )
+            logger.error(f"create_order[{c_id=}]: inserción retornó o_id=None ocurrio un error")
 
-        logger.info(f"Order created with {o_id=}, now inserting OrderItems")
-
-        _orderitems = table(
-            "orderitems",
-            column("oi_o_id"),
-            column("oi_p_id"),
-            column("oi_units"),
-            column("oi_unit_price"),
-        )
         orderitems_rows = [
             {
                 "oi_o_id": o_id,
                 "oi_p_id": item["p_id"],
                 "oi_units": item["units"],
-                "oi_unit_price": float(products[item["p_id"]].p_sale_price),
+                "oi_unit_price": products[item["p_id"]].p_sale_price,
             }
             for item in items
         ]
-        logger.info(
-            "create_order: insertando %d orderitems: %r", len(orderitems_rows), orderitems_rows
-        )
-        await session.execute(insert(_orderitems), orderitems_rows)
-        logger.info("create_order: INSERT orderitems OK, haciendo commit")
+
+        logger.info(f"create_order[{c_id=}, {o_id=}]: insertando {len(orderitems_rows)} orderitems")
+        await session.execute(insert_bulk_orderitems_query, orderitems_rows)
         await session.commit()
-        logger.info("create_order: commit OK")
+        logger.info(f"create_order[{c_id=}, {o_id=}]: commit OK")
 
         ctx.deps.active_order_id = o_id
-        logger.info("create_order created o_id=%s for c_id=%s", o_id, ctx.deps.customer.c_id)
-        summary = await order_summary(session, o_id, ctx.deps.customer.c_name)
 
     except Exception as e:
-        logger.error("create_order failed for c_id=%s: %s", ctx.deps.customer.c_id, e)
+        logger.error(f"create_order[{c_id=}]: fallo — {e}")
         logger.debug("create_order traceback:", exc_info=True)
         return "ERROR_INTERNO: No se pudo crear el pedido por un problema técnico. Intenta de nuevo en un momento."
 
+    summary = await order_summary(session, o_id, ctx.deps.customer.c_name)
+
     if settings.OWNER_WA_ID:
-        o_id = ctx.deps.active_order_id
         owner_msg = (
             f"{summary}\n\n"
             f"/approve  |  /approve {o_id}\n"
@@ -510,115 +377,91 @@ async def create_order(
 
 
 @agent.tool(prepare=_hide_when_no_order)
-async def update_order(
-    ctx: RunContext[ChatDeps],
-    action: str,
-    p_id: int,
-    units: int = 0,
-) -> str:
-    """Modifica el pedido activo del cliente.
+async def add_order_item(ctx: RunContext[ChatDeps], p_id: int, units: int) -> str:
+    """Agrega unidades de un producto al pedido activo.
 
-    Si retorna un string que empieza con "ERROR_VALIDACION:", obtén la información
-    correcta del cliente y vuelve a llamar con los parámetros corregidos.
+    Si el producto ya está en el pedido, suma `units` a la cantidad existente.
+    Si no está, lo crea. Retorna ERROR_VALIDACION: si el p_id no existe en el catálogo.
 
     Args:
-        action:
-          'add'          — aumenta la cantidad del ítem en `units` unidades (lo crea si no existe).
-          'reduce_units' — reduce la cantidad en `units` unidades; si llega a 0 elimina el ítem.
-          'set_units'    — establece la cantidad exactamente a `units` (>= 1).
-          'remove'       — elimina el ítem completo del pedido.
-        p_id: ID del producto a modificar (del catálogo en el system prompt).
-        units: Cantidad a usar según la acción. Requerido (>= 1) para 'add', 'reduce_units', 'set_units'.
+        p_id: ID del producto (del catálogo en el system prompt).
+        units: Unidades a agregar (>= 1).
     """
-    c_id = ctx.deps.customer.c_id
-    o_id = ctx.deps.active_order_id
     products = ctx.deps.products
-
-    logger.info(f"update_order({action=}, {p_id=}, {units=}) for {o_id=} {c_id=}")
-
-    # --- Validaciones de entrada (no tocan la DB) ---
-    valid_actions = {"add", "reduce_units", "set_units", "remove"}
-    if action not in valid_actions:
-        return f"ERROR_VALIDACION: acción {action!r} desconocida. Usa: {', '.join(sorted(valid_actions))}."
-
     if p_id not in products:
         return f"ERROR_VALIDACION: p_id={p_id} no existe en el catálogo."
+    if units < 1:
+        return f"ERROR_VALIDACION: units debe ser >= 1, recibido: {units}."
 
-    if action in {"add", "reduce_units", "set_units"} and units < 1:
-        return (
-            f"ERROR_VALIDACION: units debe ser >= 1 para la acción '{action}', recibido: {units}."
-        )
+    o_id = ctx.deps.active_order_id
+    c_id = ctx.deps.customer.c_id
+    logger.info(f"add_order_item[{c_id=}, {o_id=}]: {p_id=}, {units=}")
 
-    # --- Escritura a DB ---
     try:
         session = ctx.deps.session
+        item = await load_orderitem(session, o_id, p_id)
+        if item:
+            await session.execute(
+                text("UPDATE orderitems SET oi_units = oi_units + :units WHERE oi_id = :oi_id"),
+                {"units": units, "oi_id": item["oi_id"]},
+            )
+        else:
+            await session.execute(
+                text(
+                    "INSERT INTO orderitems (oi_o_id, oi_p_id, oi_units, oi_unit_price)"
+                    " VALUES (:o_id, :p_id, :units, :price)"
+                ),
+                {"o_id": o_id, "p_id": p_id, "units": units, "price": products[p_id].p_sale_price},
+            )
+        await session.commit()
+        summary = await order_summary(session, o_id, ctx.deps.customer.c_name)
+        return f"Pedido actualizado:\n{summary}"
+    except Exception as e:
+        logger.error(f"add_order_item[{c_id=}, {o_id=}]: fallo — {e}")
+        return "ERROR_INTERNO: No se pudo actualizar el pedido por un problema técnico. Intenta de nuevo en un momento."
 
-        get_orderitem_query = text("""
-            SELECT oi_id, oi_units 
-            FROM orderitems 
-            WHERE oi_o_id = :o_id AND oi_p_id = :p_id
-        """)
 
-        result = await session.execute(get_orderitem_query, {"o_id": o_id, "p_id": p_id})
-        order_item = result.mappings().first()
+@agent.tool(prepare=_hide_when_no_order)
+async def reduce_order_item(ctx: RunContext[ChatDeps], p_id: int, units: int) -> str:
+    """Reduce la cantidad de un producto en el pedido activo.
 
-        match action:
-            case "add":
-                if order_item:
-                    add_to_orderitem_query = text(
-                        "UPDATE orderitems SET oi_units = oi_units + :oi_units WHERE oi_id = :oi_id"
-                    )
-                    await session.execute(
-                        add_to_orderitem_query,
-                        {"oi_units": units, "oi_id": order_item["oi_id"]},
-                    )
-                else:
-                    insert_orderitem_query = text("""
-                            INSERT INTO orderitems (oi_o_id, oi_p_id, oi_units, oi_unit_price)
-                            VALUES (:o_id, :p_id, :units, :unit_price)
-                        """)
-                    query_args = {
-                        "o_id": o_id,
-                        "p_id": p_id,
-                        "units": units,
-                        "unit_price": products[p_id].p_sale_price,
-                    }
+    Si la cantidad resultante es <= 0, elimina el ítem. No puede dejar el pedido vacío.
+    Retorna ERROR_VALIDACION: si el p_id no está en el pedido.
 
-                    await session.execute(insert_orderitem_query, query_args)
+    Args:
+        p_id: ID del producto (del catálogo en el system prompt).
+        units: Unidades a reducir (>= 1).
+    """
+    if p_id not in ctx.deps.products:
+        return f"ERROR_VALIDACION: p_id={p_id} no existe en el catálogo."
+    if units < 1:
+        return f"ERROR_VALIDACION: units debe ser >= 1, recibido: {units}."
 
-            case "reduce_units":
-                if existing is None:
-                    return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
-                new_units = existing["oi_units"] - units
-                if new_units <= 0:
-                    await session.execute(
-                        text("DELETE FROM orderitems WHERE oi_id = :oi_id"),
-                        {"oi_id": existing["oi_id"]},
-                    )
-                else:
-                    await session.execute(
-                        text("UPDATE orderitems SET oi_units = :units WHERE oi_id = :oi_id"),
-                        {"units": new_units, "oi_id": existing["oi_id"]},
-                    )
-            case "set_units":
-                if existing is None:
-                    return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
-                await session.execute(
-                    text("UPDATE orderitems SET oi_units = :units WHERE oi_id = :oi_id"),
-                    {"units": units, "oi_id": existing["oi_id"]},
-                )
-            case "remove":
-                if existing is None:
-                    return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
-                await session.execute(
-                    text("DELETE FROM orderitems WHERE oi_id = :oi_id"),
-                    {"oi_id": existing["oi_id"]},
-                )
+    o_id = ctx.deps.active_order_id
+    c_id = ctx.deps.customer.c_id
+    logger.info(f"reduce_order_item[{c_id=}, {o_id=}]: {p_id=}, {units=}")
+
+    try:
+        session = ctx.deps.session
+        item = await load_orderitem(session, o_id, p_id)
+        if item is None:
+            return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
+
+        new_units = item["oi_units"] - units
+        if new_units <= 0:
+            await session.execute(
+                text("DELETE FROM orderitems WHERE oi_id = :oi_id"),
+                {"oi_id": item["oi_id"]},
+            )
+        else:
+            await session.execute(
+                text("UPDATE orderitems SET oi_units = :units WHERE oi_id = :oi_id"),
+                {"units": new_units, "oi_id": item["oi_id"]},
+            )
 
         remaining = (
             await session.execute(
-                text("SELECT COUNT(*) FROM orderitems WHERE oi_o_id = :o_id"),
-                {"o_id": o_id},
+                text("SELECT COUNT(*) FROM orderitems WHERE oi_o_id = :o_id"), {"o_id": o_id}
             )
         ).scalar()
         if not remaining:
@@ -626,12 +469,92 @@ async def update_order(
             return "ERROR_VALIDACION: no puedes eliminar todos los ítems del pedido. Usa cancel_order si quieres cancelarlo."
 
         await session.commit()
-
         summary = await order_summary(session, o_id, ctx.deps.customer.c_name)
         return f"Pedido actualizado:\n{summary}"
-
     except Exception as e:
-        logger.error("update_order failed for o_id=%s c_id=%s: %s", o_id, c_id, e)
+        logger.error(f"reduce_order_item[{c_id=}, {o_id=}]: fallo — {e}")
+        return "ERROR_INTERNO: No se pudo actualizar el pedido por un problema técnico. Intenta de nuevo en un momento."
+
+
+@agent.tool(prepare=_hide_when_no_order)
+async def set_order_item_units(ctx: RunContext[ChatDeps], p_id: int, units: int) -> str:
+    """Establece la cantidad exacta de un producto en el pedido activo.
+
+    El producto debe estar ya en el pedido. Para agregar un producto nuevo usa add_order_item.
+    Retorna ERROR_VALIDACION: si el p_id no está en el pedido.
+
+    Args:
+        p_id: ID del producto (del catálogo en el system prompt).
+        units: Nueva cantidad exacta (>= 1).
+    """
+    if p_id not in ctx.deps.products:
+        return f"ERROR_VALIDACION: p_id={p_id} no existe en el catálogo."
+    if units < 1:
+        return f"ERROR_VALIDACION: units debe ser >= 1, recibido: {units}."
+
+    o_id = ctx.deps.active_order_id
+    c_id = ctx.deps.customer.c_id
+    logger.info(f"set_order_item_units[{c_id=}, {o_id=}]: {p_id=}, {units=}")
+
+    try:
+        session = ctx.deps.session
+        item = await load_orderitem(session, o_id, p_id)
+        if item is None:
+            return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
+
+        await session.execute(
+            text("UPDATE orderitems SET oi_units = :units WHERE oi_id = :oi_id"),
+            {"units": units, "oi_id": item["oi_id"]},
+        )
+        await session.commit()
+        summary = await order_summary(session, o_id, ctx.deps.customer.c_name)
+        return f"Pedido actualizado:\n{summary}"
+    except Exception as e:
+        logger.error(f"set_order_item_units[{c_id=}, {o_id=}]: fallo — {e}")
+        return "ERROR_INTERNO: No se pudo actualizar el pedido por un problema técnico. Intenta de nuevo en un momento."
+
+
+@agent.tool(prepare=_hide_when_no_order)
+async def remove_order_item(ctx: RunContext[ChatDeps], p_id: int) -> str:
+    """Elimina un producto del pedido activo. No puede dejar el pedido vacío.
+
+    Retorna ERROR_VALIDACION: si el p_id no está en el pedido.
+
+    Args:
+        p_id: ID del producto a eliminar (del catálogo en el system prompt).
+    """
+    if p_id not in ctx.deps.products:
+        return f"ERROR_VALIDACION: p_id={p_id} no existe en el catálogo."
+
+    o_id = ctx.deps.active_order_id
+    c_id = ctx.deps.customer.c_id
+    logger.info(f"remove_order_item[{c_id=}, {o_id=}]: {p_id=}")
+
+    try:
+        session = ctx.deps.session
+        item = await load_orderitem(session, o_id, p_id)
+        if item is None:
+            return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
+
+        await session.execute(
+            text("DELETE FROM orderitems WHERE oi_id = :oi_id"),
+            {"oi_id": item["oi_id"]},
+        )
+
+        remaining = (
+            await session.execute(
+                text("SELECT COUNT(*) FROM orderitems WHERE oi_o_id = :o_id"), {"o_id": o_id}
+            )
+        ).scalar()
+        if not remaining:
+            await session.rollback()
+            return "ERROR_VALIDACION: no puedes eliminar todos los ítems del pedido. Usa cancel_order si quieres cancelarlo."
+
+        await session.commit()
+        summary = await order_summary(session, o_id, ctx.deps.customer.c_name)
+        return f"Pedido actualizado:\n{summary}"
+    except Exception as e:
+        logger.error(f"remove_order_item[{c_id=}, {o_id=}]: fallo — {e}")
         return "ERROR_INTERNO: No se pudo actualizar el pedido por un problema técnico. Intenta de nuevo en un momento."
 
 
@@ -647,8 +570,7 @@ async def cancel_order(ctx: RunContext[ChatDeps]) -> str:
     """
     c_id = ctx.deps.customer.c_id
     o_id = ctx.deps.active_order_id
-
-    logger.info(f"cancel_order({o_id=}, {c_id=})")
+    logger.info(f"cancel_order[{c_id=}, {o_id=}]: iniciando")
 
     # --- Escritura a DB ---
     try:
@@ -681,11 +603,11 @@ async def cancel_order(ctx: RunContext[ChatDeps]) -> str:
         await session.commit()
 
         ctx.deps.active_order_id = None
-        logger.info("cancel_order o_id=%s for c_id=%s", o_id, c_id)
+        logger.info(f"cancel_order[{c_id=}, {o_id=}]: cancelado OK")
         return f"Pedido o_id={o_id} cancelado."
 
     except Exception as e:
-        logger.error("cancel_order failed for o_id=%s c_id=%s: %s", o_id, c_id, e)
+        logger.error(f"cancel_order[{c_id=}, {o_id=}]: fallo — {e}")
         return "ERROR_INTERNO: No se pudo cancelar el pedido por un problema técnico. Intenta de nuevo en un momento."
 
 
@@ -705,11 +627,12 @@ async def escalate_to_staff(ctx: RunContext[ChatDeps], message: str) -> str:
         return "El dueño ya fue notificado. No vuelvas a llamar escalate_to_staff en este turno."
 
     customer = ctx.deps.customer
+    c_id = customer.c_id
     if not message or not message.strip():
         return "ERROR_VALIDACION: el mensaje al dueño no puede estar vacío."
 
     if not settings.OWNER_WA_ID:
-        logger.error("escalate_to_staff: OWNER_WA_ID not configured")
+        logger.error(f"escalate_to_staff[{c_id=}]: OWNER_WA_ID not configured")
         return "ERROR_INTERNO: notificación al dueño no configurada en el sistema."
 
     ctx.deps._once.add("escalate_to_staff")
@@ -733,20 +656,17 @@ async def escalate_to_staff(ctx: RunContext[ChatDeps], message: str) -> str:
             response.raise_for_status()
     except httpx.HTTPStatusError as e:
         logger.error(
-            "escalate_to_staff HTTP %s for c_id=%s: %s",
-            e.response.status_code,
-            customer.c_id,
-            e.response.text,
+            f"escalate_to_staff[{c_id=}]: HTTP {e.response.status_code} — {e.response.text}"
         )
         return "ERROR_INTERNO: no se pudo notificar al dueño. Intenta más tarde."
     except httpx.TimeoutException:
-        logger.error("escalate_to_staff timeout for c_id=%s", customer.c_id)
+        logger.error(f"escalate_to_staff[{c_id=}]: timeout")
         return "ERROR_INTERNO: no se pudo notificar al dueño (timeout). Intenta más tarde."
     except httpx.HTTPError as e:
-        logger.error("escalate_to_staff network error for c_id=%s: %s", customer.c_id, e)
+        logger.error(f"escalate_to_staff[{c_id=}]: network error — {e}")
         return "ERROR_INTERNO: no se pudo notificar al dueño. Intenta más tarde."
 
-    logger.info("Owner notified from c_id=%s: %s", customer.c_id, message)
+    logger.info(f"escalate_to_staff[{c_id=}]: dueño notificado")
     return "Notificación enviada al dueño de la tienda."
 
 
@@ -813,7 +733,9 @@ async def agent_generate_response(
         except UsageLimitExceeded as e:
             # UsageLimitExceeded se lanza desde __aexit__, no desde el loop.
             # run sigue en scope porque fue asignado en __aenter__.
-            logger.warning("Request limit hit after %s requests: %s", result.usage().requests, e)
+            logger.warning(
+                f"agent_generate_response: request limit tras {result.usage().requests} requests — {e}"
+            )
             final = await _direct_agent.run(
                 message,
                 message_history=result.all_messages(),
