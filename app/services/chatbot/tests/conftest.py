@@ -14,7 +14,7 @@ os.environ.setdefault("APP_SECRET", "test-app-secret")
 os.environ.setdefault("WHATSAPP_API_VERSION", "v18.0")
 os.environ.setdefault("PHONE_NUMBER_ID", "123456789")
 os.environ.setdefault("VERIFY_TOKEN", "test-verify-token")
-os.environ.setdefault("OWNER_WA_ID", "5215512345678")
+os.environ.setdefault("OWNER_WA_ID", "5219900000000")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-fake-key")
 
 

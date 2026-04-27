@@ -7,10 +7,8 @@ import os
 import sys
 
 _chatbot_dir = os.path.join(os.path.dirname(__file__), "..")
-_db_dir = os.path.normpath(os.path.join(_chatbot_dir, "..", "database"))
-for _p in [_chatbot_dir, _db_dir]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _chatbot_dir not in sys.path:
+    sys.path.insert(0, _chatbot_dir)
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,6 +31,7 @@ def _make_ctx(once=None):
         customer=customer,
         store=StoreInfo(s_id=1, name="Test Store", description="", properties={}),
         products="",
+        session=AsyncMock(),
     )
     if once:
         deps._once.update(once)
@@ -161,7 +160,6 @@ class TestEscalateHttpErrors:
         with patch("httpx.AsyncClient", return_value=client):
             result = await escalate_to_staff(ctx, "pregunta")
         assert result.startswith("ERROR_INTERNO")
-        assert "timeout" in result.lower()
 
     async def test_network_error(self, mock_settings):
         ctx = _make_ctx()

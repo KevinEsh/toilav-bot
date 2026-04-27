@@ -1,20 +1,17 @@
 """Tests for create_order tool in yalti.py.
 
 Validations happen before any DB write, so error cases don't need a real DB.
-Happy path mocks Session to avoid infrastructure dependencies.
+Happy path mocks the AsyncSession injected into ChatDeps.
 """
 
 import os
 import sys
 
-# Ensure chatbot and database schema modules are importable
 _chatbot_dir = os.path.join(os.path.dirname(__file__), "..")
-_db_dir = os.path.normpath(os.path.join(_chatbot_dir, "..", "database"))
-for _p in [_chatbot_dir, _db_dir]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _chatbot_dir not in sys.path:
+    sys.path.insert(0, _chatbot_dir)
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from yalti import ChatDeps, StoreInfo, create_order
@@ -24,7 +21,7 @@ from yalti import ChatDeps, StoreInfo, create_order
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_ctx(active_order_id=None):
+def _make_ctx(active_order_id=None, session=None):
     """Minimal RunContext-like object with ChatDeps."""
     customer = MagicMock()
     customer.c_id = 1
@@ -36,6 +33,7 @@ def _make_ctx(active_order_id=None):
         customer=customer,
         store=store,
         products="",
+        session=session or AsyncMock(),
         active_order_id=active_order_id,
     )
     ctx = MagicMock()
@@ -161,46 +159,39 @@ class TestCreateOrderValidations:
 
 
 # ---------------------------------------------------------------------------
-# Happy path — DB mockeado
+# Happy path — session mockeada en ChatDeps
 # ---------------------------------------------------------------------------
 
 class TestCreateOrderHappyPath:
 
+    def _make_session_for_create(self):
+        """Session mock: first execute returns o_id=42, subsequent ones return item rows."""
+        session = AsyncMock()
+
+        order_result = MagicMock()
+        order_result.scalar.return_value = 42
+
+        item_result = MagicMock()
+        item_result.mappings.return_value.first.return_value = {
+            "oi_p_id": 1, "oi_units": 2, "oi_unit_price": 120.0,
+        }
+
+        session.execute.side_effect = [order_result, item_result, item_result]
+        return session
+
     @pytest.mark.asyncio
     async def test_creates_order_and_sets_active_order_id(self):
-        ctx = _make_ctx()
-
-        mock_order = MagicMock()
-        mock_order.o_id = 42
-
-        mock_session = MagicMock()
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-
-        # Simula que flush() asigna o_id al primer objeto que se hizo add()
-        added_objects = []
-
-        def capture_add(obj):
-            added_objects.append(obj)
-
-        def flush_side_effect():
-            # Asigna o_id al objeto Orders que se hizo add primero
-            for obj in added_objects:
-                if hasattr(obj, "o_id"):
-                    obj.o_id = 42
-                    break
-
-        mock_session.add.side_effect = capture_add
-        mock_session.flush.side_effect = flush_side_effect
+        session = self._make_session_for_create()
+        ctx = _make_ctx(session=session)
 
         with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session), \
-             patch("yalti._order_summary", return_value="🛍️ Resumen del pedido"):
-
+             patch("yalti._order_summary", return_value="🛍️ Resumen del pedido"), \
+             patch("yalti._send_whatsapp_text"):
             result = await create_order(ctx, order_items=VALID_ITEMS, delivery_address=VALID_ADDRESS)
 
         assert result == "🛍️ Resumen del pedido"
         assert ctx.deps.active_order_id == 42
+        session.commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_active_order_id_stays_none_after_validation_error(self):
@@ -216,15 +207,11 @@ class TestCreateOrderHappyPath:
     @pytest.mark.asyncio
     async def test_db_exception_returns_error_interno(self):
         """Si la DB falla, retorna ERROR_INTERNO sin propagar la excepción."""
-        ctx = _make_ctx()
+        session = AsyncMock()
+        session.execute.side_effect = Exception("DB connection lost")
+        ctx = _make_ctx(session=session)
 
-        mock_session = MagicMock()
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.flush.side_effect = Exception("DB connection lost")
-
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session):
+        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
             result = await create_order(ctx, order_items=VALID_ITEMS, delivery_address=VALID_ADDRESS)
 
         assert result.startswith("ERROR_INTERNO:")

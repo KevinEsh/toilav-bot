@@ -10,7 +10,8 @@
       "WebFetch(domain:pydantic.dev)",
       "Bash(gh api:*)",
       "WebFetch(domain:github.com)",
-      "Bash(rtk gh *)"
+      "Bash(rtk gh *)",
+      "Bash(rtk read *)"
     ]
   }
 }

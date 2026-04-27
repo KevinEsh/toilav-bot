@@ -1,39 +1,48 @@
 """
-Database engine and session for the chatbot service.
+Async database engine and session factory for the chatbot service.
 
-Connects to the same PostgreSQL instance as the rest of the platform.
-The schema (SQLModel table definitions) lives in app/services/database/chatbot_schema.py
-and is mounted into this container at /schema so we can import it without duplication.
+Uses asyncpg (non-blocking). No ORM models are imported here — all queries
+use raw SQL via text(), so there is no dependency on chatbot_schema.py.
 """
 
-import sys
-from pathlib import Path
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 from config import settings
-from sqlmodel import Session, SQLModel, create_engine
 
-# Make the shared schema importable.  In Docker the volume is mounted at /schema;
-# locally the relative path is used as a fallback.
-_schema_candidates = [
-    Path("/schema"),
-    Path(__file__).parent.parent / "database",
-]
-for _p in _schema_candidates:
-    if _p.exists() and str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-        break
 
-# Import all table definitions so SQLModel.metadata is aware of them.
-from chatbot_schema import CHATBOT_MODELS  # noqa: F401, E402
+def _build_url() -> str:
+    url = (
+        f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
+        f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+    )
+    # Normalize Railway-style postgres:// and plain postgresql:// to asyncpg driver
+    url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if not url.startswith("postgresql+asyncpg://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
 
-DATABASE_URL = (
-    f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
-    f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+
+engine = create_async_engine(
+    _build_url(),
+    pool_size=10,
+    max_overflow=5,
+    pool_pre_ping=True,
+    echo=False,
 )
 
-engine = create_engine(DATABASE_URL, echo=False)
+AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-def get_session():
-    with Session(engine) as session:
-        yield session
+@asynccontextmanager
+async def get_session() -> AsyncIterator[AsyncSession]:
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise

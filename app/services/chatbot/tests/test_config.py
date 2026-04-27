@@ -17,7 +17,7 @@ class TestSettings:
         import pytest
 
         s = Settings()
-        with pytest.raises(AttributeError):
+        with pytest.raises((AttributeError, TypeError)):
             s.WHATSAPP_ACCESS_TOKEN = "new_value"
 
 

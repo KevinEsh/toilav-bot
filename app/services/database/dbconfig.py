@@ -3,7 +3,9 @@ from typing import Annotated, Any, Generator
 
 # from dotenv import load_dotenv
 # from fastapi import Depends
+from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine
+from queries import create_order_totals_trigger
 
 # load_dotenv("../../.env")
 # check if the database file exists
@@ -29,6 +31,10 @@ engine = create_engine(DATABASE_URL, echo=False)
 
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
+    if DATABASE_ENGINE == "postgresql":
+        with engine.connect() as conn:
+            conn.execute(create_order_totals_trigger)
+            conn.commit()
 
 
 def get_session() -> Generator[Session, Any, None]:

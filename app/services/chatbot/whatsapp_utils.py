@@ -2,41 +2,42 @@ import asyncio
 import logging
 import re
 from collections import OrderedDict
-from datetime import datetime, timezone
-from time import monotonic
-from typing import Callable, Generic, TypeVar
 
 import httpx
-from chatbot_schema import (
-    Conversations,
-    Customers,
-    MessageDirection,
-    Messages,
-    MessageStatus,
-    MessageType,
-    Products,
-    Stores,
-)
 from config import settings
-from database import engine
-from pydantic_ai import ModelMessagesTypeAdapter
-from pydantic_core import to_jsonable_python
-from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
-import yalti
-from yalti import StoreInfo, agent_generate_response
+from database import get_session
+from dbutils import (
+    insert_message,
+    load_conversation,
+    products_cache,
+    store_cache,
+    update_conversation,
+    update_message_status,
+    upsert_customer,
+)
+from queries import (
+    get_order_query,
+    update_order_cancelled_with_reason_query,
+    update_order_status_query,
+)
+from sqlalchemy import text
+from yalti import agent_generate_response
 
 logger = logging.getLogger(__name__)
 
+MAX_USER_BUFFERS = 50
+DEBOUNCE_SECONDS = 4  # Tiempo de espera antes de procesar mensajes acumulados
 
-class Contact:
+
+class WhatsappUser:
     """Estructura simplificada para representar un contacto de WhatsApp."""
 
-    __slots__ = ("wa_id", "name")
+    __slots__ = ("wa_id", "name", "phone")
 
-    def __init__(self, wa_id: str, name: str):
+    def __init__(self, wa_id: str, name: str, phone: str | None = None):
         self.wa_id = wa_id
         self.name = name
+        self.phone = phone
 
 
 class WhatsappMessage:
@@ -44,7 +45,7 @@ class WhatsappMessage:
 
     __slots__ = ("id", "contact", "timestamp", "text", "type")
 
-    def __init__(self, id: str, contact: Contact, timestamp: int, text: str, type: str):
+    def __init__(self, id: str, contact: WhatsappUser, timestamp: int, text: str, type: str):
         self.id = id
         self.contact = contact
         self.timestamp = timestamp
@@ -106,11 +107,9 @@ class UserMessageBuffer:
 
 # Un buffer por usuario, creado lazily con evicción LRU
 _user_buffers: OrderedDict[str, UserMessageBuffer] = OrderedDict()
-MAX_USER_BUFFERS = 20
-DEBOUNCE_SECONDS = 3  # Tiempo de espera antes de procesar mensajes acumulados
 
 
-def _get_userbuffer(wa_id: str) -> UserMessageBuffer:
+def get_userbuffer(wa_id: str) -> UserMessageBuffer:
     """Obtiene o crea el buffer para un usuario. Evicta el más antiguo si se excede el límite."""
 
     if wa_id in _user_buffers:
@@ -124,231 +123,6 @@ def _get_userbuffer(wa_id: str) -> UserMessageBuffer:
         _user_buffers.popitem(last=False)
 
     return user_buffer
-
-
-# ---------------------------------------------------------------------------
-# Generic TTL cache — reloads from DB at most once per `ttl` seconds.
-# Keeps store info and product catalog in memory so we don't hit the DB on
-# every incoming message. Both change infrequently (owner-driven updates).
-# ---------------------------------------------------------------------------
-_T = TypeVar("_T")
-
-
-class _TTLCache(Generic[_T]):
-    def __init__(self, loader: Callable[[], _T], ttl: float = 300.0):
-        self._loader = loader
-        self._ttl = ttl
-        self._value: _T | None = None
-        self._loaded_at: float = 0.0
-
-    def get(self) -> _T:
-        if self._value is None or (monotonic() - self._loaded_at) > self._ttl:
-            self._value = self._loader()
-            self._loaded_at = monotonic()
-        return self._value
-
-    def invalidate(self) -> None:
-        """Force reload on next access (e.g., after a product update webhook)."""
-        self._value = None
-        self._loaded_at = 0.0
-
-
-# ---------------------------------------------------------------------------
-# DB helpers — sessions are opened and closed around each operation so no
-# connection is held open during the (potentially slow) LLM call.
-# ---------------------------------------------------------------------------
-def _fetch_store() -> Stores:
-    with Session(engine) as session:
-        store = session.exec(select(Stores)).first()
-        if store is None:
-            logger.warning("No store record found in DB, using empty StoreInfo")
-            return Stores()
-        return store
-
-
-def _fetch_products() -> str:
-    """Lee p_rag_text de todos los productos disponibles (pre-computado en la API)."""
-    with Session(engine) as session:
-        products = session.exec(
-            select(Products).where(Products.p_is_available == True)  # noqa: E712
-        ).all()
-        yalti.PRODUCTS = {p.p_id: p for p in products}
-        if not products:
-            return "No hay productos disponibles actualmente."
-        lines = [p.p_rag_text for p in products if p.p_rag_text]
-        return "\n".join(lines) if lines else "No hay productos disponibles actualmente."
-
-
-_store_cache: _TTLCache[Stores] = _TTLCache(loader=_fetch_store, ttl=300.0)
-_products_cache: _TTLCache[str] = _TTLCache(loader=_fetch_products, ttl=300.0)
-
-
-def _get_or_create_customer(wa_id: str, name: str) -> Customers:
-    """Obtiene o crea el Customer por wa_id. Retorna el objeto en estado detached.
-
-    Si dos requests concurrentes del mismo wa_id nuevo pisan el SELECT inicial,
-    el segundo commit lanza `IntegrityError` (constraint único de c_whatsapp_id).
-    Se hace rollback + re-SELECT para devolver el registro creado por el ganador
-    de la carrera, en vez de perder el mensaje del request perdedor.
-
-    Raises:
-        ValueError: si `wa_id` viene vacío o solo espacios — evita colisión
-            de clientes distintos contra un registro con `c_whatsapp_id=""`.
-    """
-    if not wa_id or not wa_id.strip():
-        raise ValueError("wa_id vacío — no se puede identificar al cliente")
-    wa_id = wa_id.strip()
-
-    try:
-        with Session(engine) as session:
-            customer = session.exec(
-                select(Customers).where(Customers.c_whatsapp_id == wa_id)
-            ).first()
-            if customer is None:
-                customer = Customers(c_phone=wa_id, c_whatsapp_id=wa_id, c_name=name)
-                session.add(customer)
-                try:
-                    session.commit()
-                except IntegrityError:
-                    session.rollback()
-                    logger.info(
-                        "_get_or_create_customer race for wa_id=%s — re-selecting winner",
-                        wa_id,
-                    )
-                    customer = session.exec(
-                        select(Customers).where(Customers.c_whatsapp_id == wa_id)
-                    ).first()
-                    if customer is None:
-                        raise
-            session.refresh(customer)
-            return customer
-    except Exception as e:
-        logger.error("_get_or_create_customer failed for wa_id=%s: %s", wa_id, e)
-        raise
-
-
-# ---------------------------------------------------------------------------
-# Conversation history cache — LRU in-memory cache that avoids re-reading
-# + deserializing JSONB on every message for active customers.
-# ---------------------------------------------------------------------------
-class _HistoryCache:
-    """LRU cache for deserialized pydantic-ai conversation histories, keyed by c_id."""
-
-    def __init__(self, max_entries: int = 30):
-        self._store: OrderedDict[int, list] = OrderedDict()
-        self._max = max_entries
-
-    def get(self, c_id: int) -> list | None:
-        """Returns cached history or None. Promotes to MRU on hit."""
-        if c_id in self._store:
-            self._store.move_to_end(c_id)
-            return self._store[c_id]
-        return None
-
-    def set(self, c_id: int, history: list) -> None:
-        """Stores history, evicting the oldest entry if at capacity."""
-        self._store[c_id] = history
-        self._store.move_to_end(c_id)
-        if len(self._store) > self._max:
-            self._store.popitem(last=False)
-
-    def invalidate(self, c_id: int) -> None:
-        """Removes a specific entry (e.g. on conversation reset)."""
-        self._store.pop(c_id, None)
-
-
-_history_cache = _HistoryCache()
-
-
-# ---------------------------------------------------------------------------
-# Conversation persistence — one record per customer in the conversations
-# table, with full pydantic-ai history in a JSONB column.
-# ---------------------------------------------------------------------------
-def _get_or_create_conversation(session: Session, c_id: int) -> Conversations:
-    """Loads or creates the single Conversations record for a customer.
-
-    Must be called inside an existing Session (caller manages commit).
-    """
-    conv = session.exec(
-        select(Conversations).where(Conversations.cv_c_id == c_id)
-    ).first()
-    if conv is None:
-        conv = Conversations(cv_c_id=c_id)
-        session.add(conv)
-        session.flush()
-    return conv
-
-
-def _load_conversation_history(c_id: int) -> list:
-    """Loads the pydantic-ai message history for a customer.
-
-    1. Check in-memory cache (hot path).
-    2. Load from Conversations.cv_history (JSONB) and deserialize.
-    3. If no conversation exists yet, return empty list.
-
-    Returns a list of ModelRequest/ModelResponse ready for agent.iter().
-    """
-    cached = _history_cache.get(c_id)
-    if cached is not None:
-        return cached
-
-    with Session(engine) as session:
-        conv = session.exec(
-            select(Conversations).where(Conversations.cv_c_id == c_id)
-        ).first()
-        if conv is None or not conv.cv_history:
-            return []
-        history = ModelMessagesTypeAdapter.validate_python(conv.cv_history)
-        _history_cache.set(c_id, history)
-        return history
-
-
-def _persist_conversation_history(c_id: int, history: list) -> None:
-    """Persists the full pydantic-ai message history to the conversations table."""
-    serialized = to_jsonable_python(history)
-
-    with Session(engine) as session:
-        conv = _get_or_create_conversation(session, c_id)
-        conv.cv_history = serialized
-        conv.cv_updated_at = datetime.now(timezone.utc)
-        session.add(conv)
-        session.commit()
-
-    _history_cache.set(c_id, history)
-
-
-def _persist_message(
-    customer: Customers,
-    direction: MessageDirection,
-    content: str,
-    msg_type: MessageType = MessageType.TEXT,
-    status: MessageStatus = MessageStatus.RECEIVED,
-) -> Messages:
-    """Persiste un único mensaje en la DB y retorna el objeto creado."""
-    with Session(engine) as session:
-        msg = Messages(
-            m_c_id=customer.c_id,
-            m_direction=direction,
-            m_type=msg_type,
-            m_content=content,
-            m_status=status,
-        )
-        session.add(msg)
-        session.commit()
-        session.refresh(msg)
-        return msg
-
-
-def _update_message_status(m_id: int, status: MessageStatus) -> None:
-    """Actualiza el status de un mensaje existente."""
-    with Session(engine) as session:
-        msg = session.get(Messages, m_id)
-        if msg is None:
-            logger.warning("_update_message_status: m_id=%s not found", m_id)
-            return
-        msg.m_status = status
-        session.add(msg)
-        session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +140,7 @@ _UNSUPPORTED_TYPE_RESPONSE = {
 }
 
 
-def extract_message(body) -> WhatsappMessage | None:
+def struct_message_from_payload(body) -> WhatsappMessage | None:
     """Extrae un WhatsappMessage de la estructura del webhook, o retorna None si no es válido."""
     try:
         entry = body["entry"][0]
@@ -375,47 +149,55 @@ def extract_message(body) -> WhatsappMessage | None:
         contact_info = value["contacts"][0]
         message_info = value["messages"][0]
 
-        contact = Contact(wa_id=contact_info["wa_id"], name=contact_info["profile"]["name"])
-        message = WhatsappMessage(
-            id=message_info.get("id", ""),
-            contact=contact,
-            timestamp=int(message_info.get("timestamp", 0)),
-            text=message_info.get("text", {}).get("body", ""),
-            type=message_info.get("type", ""),
+        contact = WhatsappUser(
+            wa_id=contact_info["wa_id"],
+            name=contact_info["profile"]["name"],
+            phone=value["metadata"]["display_phone_number"],
         )
-        return message
-    except (KeyError, IndexError, TypeError) as e:
+
+        if message_info.get("type") == "text":
+            return WhatsappMessage(
+                id=message_info.get("id", ""),
+                contact=contact,
+                timestamp=int(message_info.get("timestamp", 0)),
+                text=message_info.get("text", {}).get("body", ""),
+                type=message_info.get("type", ""),
+            )
+        else:
+            raise ValueError(f"Unsupported message type: {message_info.get('type')}")
+
+    except (KeyError, IndexError, TypeError, ValueError) as e:
         logger.warning(f"Failed to extract message from webhook body: {e}")
         return None
 
 
-def _extract_message_text(message: dict) -> str | None:
-    """Extrae el texto del mensaje. Retorna None si debe ignorarse, o un string
-    de aviso si el tipo no está soportado."""
-    msg_type = message.get("type", "")
+# def _struct_message_from_payload_text(message: dict) -> str | None:
+#     """Extrae el texto del mensaje. Retorna None si debe ignorarse, o un string
+#     de aviso si el tipo no está soportado."""
+#     msg_type = message.get("type", "")
 
-    if msg_type == "text":
-        return message["text"]["body"]
+#     if msg_type == "text":
+#         return message["text"]["body"]
 
-    # Imagen/video/documento con caption → usar el caption como texto
-    if msg_type in ("image", "video", "document"):
-        caption = message.get(msg_type, {}).get("caption")
-        if caption:
-            return caption
+#     # Imagen/video/documento con caption → usar el caption como texto
+#     if msg_type in ("image", "video", "document"):
+#         caption = message.get(msg_type, {}).get("caption")
+#         if caption:
+#             return caption
 
-    # Interactive (botones, listas) → extraer el texto seleccionado
-    if msg_type == "interactive":
-        interactive = message.get("interactive", {})
-        reply = interactive.get("button_reply") or interactive.get("list_reply")
-        if reply:
-            return reply.get("title", "")
+#     # Interactive (botones, listas) → extraer el texto seleccionado
+#     if msg_type == "interactive":
+#         interactive = message.get("interactive", {})
+#         reply = interactive.get("button_reply") or interactive.get("list_reply")
+#         if reply:
+#             return reply.get("title", "")
 
-    # Tipo no soportado → retornar aviso o None para ignorar
-    if msg_type in _UNSUPPORTED_TYPE_RESPONSE:
-        return _UNSUPPORTED_TYPE_RESPONSE[msg_type]
+#     # Tipo no soportado → retornar aviso o None para ignorar
+#     if msg_type in _UNSUPPORTED_TYPE_RESPONSE:
+#         return _UNSUPPORTED_TYPE_RESPONSE[msg_type]
 
-    logger.warning("Unknown message type: %s", msg_type)
-    return None
+#     logger.warning("Unknown message type: %s", msg_type)
+#     return None
 
 
 # ---------------------------------------------------------------------------
@@ -427,32 +209,44 @@ def log_http_response(response: httpx.Response):
     logging.info(f"Body: {response.text}")
 
 
-def encapsulate_text_message(recipient: str, text: str) -> dict:
+def encapsulate_text_message(whatsapp_id: str, text: str) -> dict:
     """Construye el payload para un mensaje de texto saliente."""
     return {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
-        "to": recipient,
+        "to": whatsapp_id,
         "type": "text",
         "text": {"preview_url": False, "body": text},
     }
 
 
-async def send_message(data: dict, phone_number_id: str | None = None) -> httpx.Response | None:
-    """Envía un mensaje al cliente final.
+async def send_text_message(data: dict, whatsapp_id: str) -> httpx.Response | None:
+    """Envía un mensaje al API de WhatsApp Cloud."""
+    headers = {
+        "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
+    }
 
-    STUB INTENCIONAL: durante desarrollo no mandamos mensajes reales a clientes
-    para no spammear números reales. El bot imprime el payload a stdout y
-    retorna. Para activar el envío real, delegar en `whatsapp_client.post_message`
-    (igual que `escalate_to_staff`) — el cliente compartido ya maneja
-    URL, headers, timeout y errores.
+    url = f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}/{whatsapp_id}/messages"
 
-    Nota: la notificación al dueño (`escalate_to_staff`) sí va al API real,
-    porque durante desarrollo queremos validar que las escalations lleguen al
-    propio teléfono del dev.
-    """
-    print("Sending message to WhatsApp API:", data)
-    return None
+    print(f"Sending message to {whatsapp_id} via WhatsApp API:", data)
+    return
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json=data, headers=headers, timeout=10)
+            response.raise_for_status()
+        except httpx.TimeoutException:
+            logging.error("Timeout occurred while sending message")
+            return
+        except httpx.HTTPStatusError as e:
+            logging.error(f"Request failed due to: {e} — body: {e.response.text}")
+            return
+        except httpx.HTTPError as e:
+            logging.error(f"Request failed due to: {e}")
+            return
+        else:
+            log_http_response(response)
+            return response
 
 
 def parse_text_for_whatsapp(text: str) -> str:
@@ -465,21 +259,134 @@ def parse_text_for_whatsapp(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Owner command handler (stub — expanded in later phases)
+# Owner command handler
 # ---------------------------------------------------------------------------
-async def handle_owner_command(text: str):
-    """Despacha los comandos slash del dueño de la tienda.
+async def handle_approve(args: str) -> None:
+    """Handles /approve <order_id>. Requires a valid order_id."""
+    usage = "Uso: /aprobar <order_id>\nejemplo: /aprobar 42"
 
-    Mensajes sin '/' se ignoran mientras no haya un HUMAN_TAKEOVER activo.
-    Los handlers por fase se conectan aquí en iteraciones posteriores.
-    """
-    if not text.startswith("/"):
-        logger.info("Owner sent free-text (no active takeover): %r", text)
+    # Validacion, esta el order_id y es un numero?
+    if not args or not args.strip().isdigit():
+        await send_text_message(settings.OWNER_WA_ID, f"Debes indicar el ID de la orden.\n{usage}")
         return
-    command, _, args = text[1:].partition(" ")
+
+    o_id = int(args.strip())
+
+    # Verificar que la orden exista y esté pendiente de aprobación. Extraer la info del cliente para notificarlo.
+    async with get_session() as session:
+        query_args = {"o_id": o_id, "o_status": "PENDING_STORE_APPROVAL"}
+        row = await session.execute(get_order_query, query_args).mappings().first()
+
+        # Si no se encuentra la orden o no está en estado correcto, notificar al dueño y salir
+        if row is None:
+            await send_text_message(
+                settings.OWNER_WA_ID,
+                f"No se encontró la orden #{o_id} pendiente de aprobación.\n{usage}",
+            )
+            return
+
+        # Actualizar el estado de la orden a 'APPROVED_PENDING_PAYMENT'
+        query_args = {"o_id": o_id, "o_status": "APPROVED_PENDING_PAYMENT"}
+        result = await session.execute(update_order_status_query, query_args)
+
+    if result.rowcount == 0:
+        logger.warning(
+            f"No se pudo actualizar la orden {o_id} — posible condición de carrera o error"
+        )
+        # TODO: definir si tambien se debe de notificar al owner sobre el error
+        return
+
+    logger.info(f"Store approved {o_id=}")
+
+    await send_text_message(
+        row["c_whatsapp_id"],
+        f"Tu orden #{o_id} fue aprobada."
+        "Transfiere a la siguiente cuenta y comparte tu comprobante para proceder al envio:"
+        ""
+        "Banco: EjemploBank"
+        "Cuenta: 123456789"
+        "Titular: Tienda Ejemplo",
+    )  # TODO: idealmente esto no estaría hardcodeado sino que vendría de la DB en StoreRow
+
+    await send_text_message(
+        settings.OWNER_WA_ID,
+        f"✅ Orden #{o_id} aprobada."
+        f"Mandé la informacion de pago a {row['c_phone']}. Contactalo para coordinar el pago.",
+    )
+
+
+async def handle_reject(args: str) -> None:
+    """Handles /reject <o_id> [motivo]. Requires a valid o_id."""
+    usage = "Uso: /rechazar <o_id> <motivo>\nejemplo: /rechazar 42 sin producto disponible"
+    parts = args.strip().split(maxsplit=1) if args.strip() else []
+
+    if not parts or not parts[0].isdigit():
+        await send_text_message(settings.OWNER_WA_ID, f"Debes indicar el ID de la orden.\n{usage}")
+        return
+
+    o_id = int(parts[0])
+    o_cancel_reason = parts[1].strip() if len(parts) > 1 else None
+
+    async with get_session() as session:
+        query_args = {"o_id": o_id, "o_status": "PENDING_STORE_APPROVAL"}
+        row = await session.execute(get_order_query, query_args).mappings().first()
+
+        if row is None:
+            await send_text_message(
+                settings.OWNER_WA_ID,
+                f"No se encontró la orden #{o_id} pendiente de aprobación.\n{usage}",
+            )
+            return
+
+        # Actualizar el estado de la orden a 'CANCELLED'
+        query_args = {"o_id": o_id, "o_status": "CANCELLED"}
+        if o_cancel_reason:
+            query_args["o_cancel_reason"] = o_cancel_reason
+            result = await session.execute(update_order_cancelled_with_reason_query, query_args)
+        else:
+            result = await session.execute(update_order_status_query, query_args)
+
+        if result.rowcount == 0:
+            logger.warning(
+                f"No se pudo actualizar la orden {o_id} — posible condición de carrera o error"
+            )
+            # TODO: definir si tambien se debe de notificar al owner sobre el error
+            return
+
+    logger.info("Owner rejected o_id=%s reason=%r", o_id, o_cancel_reason)
+
+    reason_line = f"\nMotivo: {o_cancel_reason}" if o_cancel_reason else ""
+    await send_text_message(
+        row["c_whatsapp_id"],
+        f"❌️ Tu orden #{o_id} fue rechazada.{reason_line}\n\n¿Puedo ayudarte con algo más?",
+    )
+    await send_text_message(
+        settings.OWNER_WA_ID,
+        f"❌️ Orden #{o_id} rechazada. Notifiqué al cliente.",
+    )
+
+
+async def handle_owner_command(message: WhatsappMessage) -> None:
+    """Dispatches slash commands from the store owner.
+
+    Free-text messages are ignored while there is no active HUMAN_TAKEOVER.
+    """
+    text_body = message.text.strip()
+    if not text_body.startswith("/"):
+        logger.info("Owner sent free-text (no active takeover): %r", text_body)
+        return
+
+    command, _, args = text_body[1:].partition(" ")
     command = command.lower().strip()
+    args = args.strip()
     logger.info("Owner command: /%s args=%r", command, args)
-    # TODO: dispatch to per-phase command handlers in later phases
+
+    if command == "aprovar":
+        await handle_approve(args)
+    elif command == "rechazar":
+        await handle_reject(args)
+    else:
+        logger.info("Unknown owner command: /%s", command)
 
 
 # ---------------------------------------------------------------------------
@@ -495,18 +402,19 @@ async def process_whatsapp_message(body: dict):
     4. LLM call sin conexión a DB abierta.
     5. Persiste history actualizado — nueva sesión corta.
     """
-    incoming_message = extract_message(body)
+    incoming_message = struct_message_from_payload(body)
     if incoming_message is None:
         logger.warning("Received invalid WhatsApp message structure, ignoring.")
         return
 
-    # ── Owner routing ────────────────────────────────────────────────────────
     if incoming_message.contact.wa_id == settings.OWNER_WA_ID:
         await handle_owner_command(incoming_message)
-        return
+    else:
+        await handle_customer_message(incoming_message)
 
-    # ── Customer flow ────────────────────────────────────────────────────────
-    user_buffer = _get_userbuffer(incoming_message.contact.wa_id)
+
+async def handle_customer_message(incoming_message: WhatsappMessage) -> None:
+    user_buffer = get_userbuffer(incoming_message.contact.wa_id)
 
     if user_buffer.is_duplicate(incoming_message):
         logger.info(
@@ -516,51 +424,48 @@ async def process_whatsapp_message(body: dict):
         )
         return
 
+    # Agrega el mensaje al buffer y espera un momento para acumular posibles mensajes adicionales
+    # del mismo usuario que lleguen en rápida sucesión (e.g., si el cliente envía varios mensajes seguidos).
     user_buffer.add_message(incoming_message)
     await user_buffer.wait_for_more_messages()
     combined_messages = user_buffer.flush()
 
+    if not combined_messages:
+        return
+
     wa_id = incoming_message.contact.wa_id
     name = incoming_message.contact.name
-    logger.info("Processing buffered messages from %s: %s", wa_id, combined_messages)
+    phone = incoming_message.contact.phone
+    logger.info(f"Processing buffered messages from {wa_id}: {combined_messages}")
 
     try:
-        # 1. Load conversation history from Conversations table (cached)
-        customer = _get_or_create_customer(wa_id, name)
-        history = _load_conversation_history(customer.c_id)
+        # Phase 1: pre-LLM DB work — get customer, load history, persist inbound message
+        async with get_session() as session:
+            customer = await upsert_customer(session, wa_id, phone, name)
+            history = await load_conversation(session, customer.c_id)
+            store = await store_cache.aget(session)
+            products = await products_cache.aget(session)
+            inbound_id = await insert_message(session, customer.c_id, "INBOUND", combined_messages)
 
-        # 2. Persist inbound message immediately — available for reprocessing on crash
-        inbound_msg = _persist_message(
-            customer=customer,
-            direction=MessageDirection.INBOUND,
-            content=combined_messages,
-            status=MessageStatus.RECEIVED,
-        )
-
-        # 3. LLM call with no open DB connection
+        # Phase 2: LLM call — agent opens its own session via ChatDeps
         response_text, all_messages = await agent_generate_response(
             message=combined_messages,
             customer=customer,
-            store=_store_cache.get(),
-            products=_products_cache.get(),
+            store=store,
+            products=products,
             history=history,
         )
 
         response_text = parse_text_for_whatsapp(response_text)
 
-        # 4. Persist bot response to Messages table
-        _persist_message(
-            customer=customer,
-            direction=MessageDirection.OUTBOUND,
-            content=response_text,
-            status=MessageStatus.SENT,
-        )
-        _update_message_status(inbound_msg.m_id, MessageStatus.PROCESSED)
+        # Phase 3: post-LLM DB work — persist response and update inbound status
+        async with get_session() as session:
+            await insert_message(session, customer.c_id, "OUTBOUND", response_text, "SENT")
+            await update_message_status(session, inbound_id, "PROCESSED")
+            await update_conversation(session, customer.c_id, all_messages)
 
-        # 5. Persist full pydantic-ai history to Conversations table (with sliding window)
-        _persist_conversation_history(customer.c_id, all_messages)
-
-        await send_message(encapsulate_text_message(wa_id, response_text), wa_id)
+        outbound_message = encapsulate_text_message(wa_id, response_text)
+        await send_text_message(outbound_message, wa_id)
     except Exception:
         logger.exception("Failed to process messages from %s", wa_id)
 

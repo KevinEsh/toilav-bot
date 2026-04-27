@@ -7,10 +7,8 @@ import os
 import sys
 
 _chatbot_dir = os.path.join(os.path.dirname(__file__), "..")
-_db_dir = os.path.normpath(os.path.join(_chatbot_dir, "..", "database"))
-for _p in [_chatbot_dir, _db_dir]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _chatbot_dir not in sys.path:
+    sys.path.insert(0, _chatbot_dir)
 
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -31,18 +29,11 @@ def _make_product(p_id, name, price):
 
 
 def _make_item(p_id, units, unit_price):
-    item = MagicMock()
-    item.oi_p_id = p_id
-    item.oi_units = units
-    item.oi_unit_price = unit_price
-    return item
+    return {"oi_p_id": p_id, "oi_units": units, "oi_unit_price": unit_price}
 
 
-def _make_order(total=260.0, customer_notes="Calle 15 #45-23"):
-    order = MagicMock()
-    order.o_total = total
-    order.o_customer_notes = customer_notes
-    return order
+def _make_order(o_id=99, total=260.0, customer_notes="Calle 15 #45-23"):
+    return {"o_id": o_id, "o_total": total, "o_customer_notes": customer_notes}
 
 
 FAKE_PRODUCTS = {
@@ -93,7 +84,7 @@ class TestOrderSummaryFallbacks:
         assert "Total: $0" in result
 
     def test_o_total_none_fallback(self):
-        """order.o_total=None (edge: DB row sin total) → Total: $0, no TypeError."""
+        """order['o_total']=None (edge: DB row sin total) → Total: $0, no TypeError."""
         order = _make_order(total=None)
         items = [_make_item(1, 1, 120.0)]
         with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
@@ -117,7 +108,7 @@ class TestOrderSummaryNumericTypes:
         assert "Total: $240" in result
 
     def test_decimal_order_total(self):
-        """order.o_total como Decimal → se convierte con float() sin error."""
+        """order['o_total'] como Decimal → se convierte con float() sin error."""
         order = _make_order(total=Decimal("305.50"))
         items = [_make_item(1, 1, 120.0)]
         with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
