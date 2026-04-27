@@ -16,6 +16,7 @@ class CustomerRow:
     c_id: int
     c_name: str | None
     c_whatsapp_id: str
+    c_phone: str | None = None
 
 
 @dataclass
@@ -61,3 +62,4 @@ class OrderItemRow:
     oi_id: int
     oi_p_id: int
     oi_units: int
+    oi_unit_price: Decimal | None = None
