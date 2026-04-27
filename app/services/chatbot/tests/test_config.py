@@ -8,8 +8,9 @@ from config import Settings, configure_logging
 class TestSettings:
     def test_reads_env_vars(self):
         s = Settings()
-        assert s.ACCESS_TOKEN == os.environ.get("ACCESS_TOKEN", "")
-        assert s.VERIFY_TOKEN == os.environ.get("VERIFY_TOKEN", "")
+        assert s.WHATSAPP_ACCESS_TOKEN == os.environ.get("WHATSAPP_ACCESS_TOKEN", "")
+        # VERIFY_TOKEN lee de NGROK_VERIFY_TOKEN por diseño actual — ver tech_debt.md
+        assert s.VERIFY_TOKEN == os.environ.get("NGROK_VERIFY_TOKEN", "")
 
     def test_frozen(self):
         """Settings should be immutable."""
@@ -17,7 +18,7 @@ class TestSettings:
 
         s = Settings()
         with pytest.raises(AttributeError):
-            s.ACCESS_TOKEN = "new_value"
+            s.WHATSAPP_ACCESS_TOKEN = "new_value"
 
 
 class TestConfigureLogging:
