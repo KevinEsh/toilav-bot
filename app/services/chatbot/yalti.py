@@ -403,7 +403,7 @@ async def add_order_item(ctx: RunContext[ChatDeps], p_id: int, units: int) -> st
         if item:
             await session.execute(
                 text("UPDATE orderitems SET oi_units = oi_units + :units WHERE oi_id = :oi_id"),
-                {"units": units, "oi_id": item["oi_id"]},
+                {"units": units, "oi_id": item.oi_id},
             )
         else:
             await session.execute(
@@ -447,16 +447,16 @@ async def reduce_order_item(ctx: RunContext[ChatDeps], p_id: int, units: int) ->
         if item is None:
             return f"ERROR_VALIDACION: p_id={p_id} no está en el pedido."
 
-        new_units = item["oi_units"] - units
+        new_units = item.oi_units - units
         if new_units <= 0:
             await session.execute(
                 text("DELETE FROM orderitems WHERE oi_id = :oi_id"),
-                {"oi_id": item["oi_id"]},
+                {"oi_id": item.oi_id},
             )
         else:
             await session.execute(
                 text("UPDATE orderitems SET oi_units = :units WHERE oi_id = :oi_id"),
-                {"units": new_units, "oi_id": item["oi_id"]},
+                {"units": new_units, "oi_id": item.oi_id},
             )
 
         remaining = (
@@ -504,7 +504,7 @@ async def set_order_item_units(ctx: RunContext[ChatDeps], p_id: int, units: int)
 
         await session.execute(
             text("UPDATE orderitems SET oi_units = :units WHERE oi_id = :oi_id"),
-            {"units": units, "oi_id": item["oi_id"]},
+            {"units": units, "oi_id": item.oi_id},
         )
         await session.commit()
         summary = await order_summary(session, o_id, ctx.deps.customer.c_name)
@@ -538,7 +538,7 @@ async def remove_order_item(ctx: RunContext[ChatDeps], p_id: int) -> str:
 
         await session.execute(
             text("DELETE FROM orderitems WHERE oi_id = :oi_id"),
-            {"oi_id": item["oi_id"]},
+            {"oi_id": item.oi_id},
         )
 
         remaining = (
@@ -630,10 +630,6 @@ async def escalate_to_staff(ctx: RunContext[ChatDeps], message: str) -> str:
     c_id = customer.c_id
     if not message or not message.strip():
         return "ERROR_VALIDACION: el mensaje al dueño no puede estar vacío."
-
-    if not settings.OWNER_WA_ID:
-        logger.error(f"escalate_to_staff[{c_id=}]: OWNER_WA_ID not configured")
-        return "ERROR_INTERNO: notificación al dueño no configurada en el sistema."
 
     ctx.deps._once.add("escalate_to_staff")
     body = f"🔔 Consulta de *{customer.c_name}* ({customer.c_whatsapp_id}):\n\n{message.strip()}"

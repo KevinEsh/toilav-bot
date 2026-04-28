@@ -14,25 +14,26 @@ if _chatbot_dir not in sys.path:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from yalti import ChatDeps, StoreInfo, create_order
+from models import StoreRow
+from yalti import ChatDeps, create_order
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_ctx(active_order_id=None, session=None):
+def _make_ctx(active_order_id=None, session=None, products=None):
     """Minimal RunContext-like object with ChatDeps."""
     customer = MagicMock()
     customer.c_id = 1
     customer.c_name = "Test User"
 
-    store = StoreInfo(s_id=1, name="Test Store", description="desc", properties={})
+    store = StoreRow(s_id=1, s_name="Test Store", s_description="desc")
 
     deps = ChatDeps(
         customer=customer,
         store=store,
-        products="",
+        products=products if products is not None else FAKE_PRODUCTS,
         session=session or AsyncMock(),
         active_order_id=active_order_id,
     )
@@ -67,24 +68,21 @@ class TestCreateOrderValidations:
     @pytest.mark.asyncio
     async def test_empty_order_items(self):
         ctx = _make_ctx()
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=[], delivery_address=VALID_ADDRESS)
+        result = await create_order(ctx, items=[], delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert ctx.deps.active_order_id is None
 
     @pytest.mark.asyncio
     async def test_empty_delivery_address(self):
         ctx = _make_ctx()
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=VALID_ITEMS, delivery_address="")
+        result = await create_order(ctx, items=VALID_ITEMS, delivery_address="")
         assert result.startswith("ERROR_VALIDACION:")
         assert ctx.deps.active_order_id is None
 
     @pytest.mark.asyncio
     async def test_whitespace_delivery_address(self):
         ctx = _make_ctx()
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=VALID_ITEMS, delivery_address="   ")
+        result = await create_order(ctx, items=VALID_ITEMS, delivery_address="   ")
         assert result.startswith("ERROR_VALIDACION:")
         assert ctx.deps.active_order_id is None
 
@@ -92,8 +90,7 @@ class TestCreateOrderValidations:
     async def test_unknown_p_id(self):
         ctx = _make_ctx()
         items = [{"p_id": 999, "units": 1}]
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=items, delivery_address=VALID_ADDRESS)
+        result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert "p_id=999" in result
         assert ctx.deps.active_order_id is None
@@ -102,8 +99,7 @@ class TestCreateOrderValidations:
     async def test_units_zero(self):
         ctx = _make_ctx()
         items = [{"p_id": 1, "units": 0}]
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=items, delivery_address=VALID_ADDRESS)
+        result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert ctx.deps.active_order_id is None
 
@@ -111,8 +107,7 @@ class TestCreateOrderValidations:
     async def test_units_negative(self):
         ctx = _make_ctx()
         items = [{"p_id": 1, "units": -3}]
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=items, delivery_address=VALID_ADDRESS)
+        result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert ctx.deps.active_order_id is None
 
@@ -120,8 +115,7 @@ class TestCreateOrderValidations:
     async def test_item_not_a_dict(self):
         ctx = _make_ctx()
         items = ["almendras 2 unidades"]  # cadena en lugar de dict
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=items, delivery_address=VALID_ADDRESS)
+        result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert ctx.deps.active_order_id is None
 
@@ -129,8 +123,7 @@ class TestCreateOrderValidations:
     async def test_item_missing_units_field(self):
         ctx = _make_ctx()
         items = [{"p_id": 1}]  # falta units
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=items, delivery_address=VALID_ADDRESS)
+        result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert ctx.deps.active_order_id is None
 
@@ -138,8 +131,7 @@ class TestCreateOrderValidations:
     async def test_item_missing_p_id_field(self):
         ctx = _make_ctx()
         items = [{"units": 2}]  # falta p_id
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=items, delivery_address=VALID_ADDRESS)
+        result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert ctx.deps.active_order_id is None
 
@@ -151,8 +143,7 @@ class TestCreateOrderValidations:
             {"p_id": 999, "units": 2},   # p_id inválido
             {"p_id": 1, "units": 0},      # units inválido
         ]
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=items, delivery_address=VALID_ADDRESS)
+        result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert "p_id=999" in result
         assert ctx.deps.active_order_id is None
@@ -184,10 +175,9 @@ class TestCreateOrderHappyPath:
         session = self._make_session_for_create()
         ctx = _make_ctx(session=session)
 
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti._order_summary", return_value="🛍️ Resumen del pedido"), \
+        with patch("yalti.order_summary", new=AsyncMock(return_value="🛍️ Resumen del pedido")), \
              patch("yalti._send_whatsapp_text"):
-            result = await create_order(ctx, order_items=VALID_ITEMS, delivery_address=VALID_ADDRESS)
+            result = await create_order(ctx, items=VALID_ITEMS, delivery_address=VALID_ADDRESS)
 
         assert result == "🛍️ Resumen del pedido"
         assert ctx.deps.active_order_id == 42
@@ -199,8 +189,7 @@ class TestCreateOrderHappyPath:
         ctx = _make_ctx()
         assert ctx.deps.active_order_id is None
 
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            await create_order(ctx, order_items=[], delivery_address=VALID_ADDRESS)
+        await create_order(ctx, items=[], delivery_address=VALID_ADDRESS)
 
         assert ctx.deps.active_order_id is None
 
@@ -211,8 +200,7 @@ class TestCreateOrderHappyPath:
         session.execute.side_effect = Exception("DB connection lost")
         ctx = _make_ctx(session=session)
 
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await create_order(ctx, order_items=VALID_ITEMS, delivery_address=VALID_ADDRESS)
+        result = await create_order(ctx, items=VALID_ITEMS, delivery_address=VALID_ADDRESS)
 
         assert result.startswith("ERROR_INTERNO:")
         assert ctx.deps.active_order_id is None

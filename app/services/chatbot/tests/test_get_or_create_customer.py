@@ -1,6 +1,7 @@
-"""Tests for _get_or_create_customer in whatsapp_utils.py.
+"""Tests for upsert_customer in dbutils.py.
 
-Mockea Session + select para no tocar DB real.
+Tests async upsert_customer(session, whatsapp_id, phone, name) using a mocked AsyncSession.
+Uses ON CONFLICT DO UPDATE — no manual race handling needed.
 """
 
 import os
@@ -12,143 +13,79 @@ for _p in [_chatbot_dir, _db_dir]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy.exc import IntegrityError, OperationalError
 
-from whatsapp_utils import _get_or_create_customer
+from dbutils import upsert_customer
+from models import CustomerRow
 
 
-def _make_session(first_return=None, commit_side_effect=None, exec_side_effect=None):
-    session = MagicMock()
-    session.__enter__ = MagicMock(return_value=session)
-    session.__exit__ = MagicMock(return_value=False)
+def _make_session(customer_row=None, exec_side_effect=None):
+    """AsyncMock session that returns given row from execute().mappings().first()."""
+    session = AsyncMock()
     if exec_side_effect is not None:
-        session.exec.side_effect = exec_side_effect
+        session.execute.side_effect = exec_side_effect
     else:
         result = MagicMock()
-        result.first.return_value = first_return
-        session.exec.return_value = result
-    if commit_side_effect is not None:
-        session.commit.side_effect = commit_side_effect
+        result.mappings.return_value.first.return_value = customer_row
+        session.execute.return_value = result
     return session
 
 
-# ---------------------------------------------------------------------------
-# Validación de wa_id — protege contra colisión de clientes
-# ---------------------------------------------------------------------------
-
-class TestGetOrCreateCustomerValidation:
-
-    def test_empty_wa_id_raises(self):
-        with pytest.raises(ValueError, match="wa_id vacío"):
-            _get_or_create_customer("", "Juan")
-
-    def test_none_wa_id_raises(self):
-        with pytest.raises(ValueError, match="wa_id vacío"):
-            _get_or_create_customer(None, "Juan")  # type: ignore[arg-type]
-
-    def test_whitespace_wa_id_raises(self):
-        with pytest.raises(ValueError, match="wa_id vacío"):
-            _get_or_create_customer("   \t  ", "Juan")
-
-    def test_wa_id_is_stripped_before_create(self):
-        """wa_id con whitespace alrededor se normaliza antes de crear el Customer."""
-        session = _make_session(first_return=None)
-        with patch("whatsapp_utils.Session", return_value=session):
-            _get_or_create_customer("  5215512345678  ", "Juan")
-        created = session.add.call_args.args[0]
-        assert created.c_whatsapp_id == "5215512345678"
-        assert created.c_phone == "5215512345678"
+def _customer_dict(c_id=1, c_name="Juan", c_whatsapp_id="5215512345678"):
+    return {"c_id": c_id, "c_name": c_name, "c_whatsapp_id": c_whatsapp_id}
 
 
 # ---------------------------------------------------------------------------
-# Happy path + error handling
+# Happy path
 # ---------------------------------------------------------------------------
 
-class TestGetOrCreateCustomerHappyPath:
+class TestUpsertCustomerHappyPath:
 
-    def test_returns_existing_customer(self):
-        existing = MagicMock(c_id=1, c_whatsapp_id="5215512345678")
-        session = _make_session(first_return=existing)
-        with patch("whatsapp_utils.Session", return_value=session):
-            result = _get_or_create_customer("5215512345678", "Juan")
-        assert result is existing
-        session.add.assert_not_called()
-        session.commit.assert_not_called()
+    @pytest.mark.asyncio
+    async def test_returns_customer_row(self):
+        session = _make_session(customer_row=_customer_dict())
+        result = await upsert_customer(session, "5215512345678", "5215512345678", "Juan")
+        assert isinstance(result, CustomerRow)
+        assert result.c_id == 1
+        assert result.c_name == "Juan"
+        assert result.c_whatsapp_id == "5215512345678"
 
-    def test_creates_new_customer_when_not_found(self):
-        session = _make_session(first_return=None)
-        with patch("whatsapp_utils.Session", return_value=session):
-            _get_or_create_customer("5215512345678", "Juan")
-        session.add.assert_called_once()
-        session.commit.assert_called_once()
+    @pytest.mark.asyncio
+    async def test_passes_whatsapp_id_and_name(self):
+        session = _make_session(customer_row=_customer_dict(c_name="María", c_whatsapp_id="52999"))
+        await upsert_customer(session, "52999", "52999", "María")
+        session.execute.assert_called_once()
+        args_dict = session.execute.call_args.args[1]
+        assert args_dict["whatsapp_id"] == "52999"
+        assert args_dict["name"] == "María"
 
+    @pytest.mark.asyncio
+    async def test_passes_phone_separately(self):
+        session = _make_session(customer_row=_customer_dict())
+        await upsert_customer(session, "521111", "5521111", "Test")
+        args_dict = session.execute.call_args.args[1]
+        assert args_dict["whatsapp_id"] == "521111"
+        assert args_dict["c_phone"] == "5521111"
 
-class TestGetOrCreateCustomerErrorHandling:
-
-    def test_db_error_on_select_reraises_with_log(self):
-        """OperationalError en el SELECT se loguea y re-propaga."""
-        session = _make_session(
-            exec_side_effect=OperationalError("stmt", {}, Exception("conn refused"))
-        )
-        with patch("whatsapp_utils.Session", return_value=session):
-            with pytest.raises(OperationalError):
-                _get_or_create_customer("5215512345678", "Juan")
-
-    def test_db_error_on_commit_reraises(self):
-        """Falla en commit distinta a IntegrityError se propaga al caller."""
-        session = _make_session(
-            first_return=None,
-            commit_side_effect=OperationalError("stmt", {}, Exception("commit failed")),
-        )
-        with patch("whatsapp_utils.Session", return_value=session):
-            with pytest.raises(OperationalError):
-                _get_or_create_customer("5215512345678", "Juan")
+    @pytest.mark.asyncio
+    async def test_existing_customer_returned(self):
+        """ON CONFLICT → existing customer is returned (DB handles idempotency)."""
+        existing = _customer_dict(c_id=99, c_name="Existente")
+        session = _make_session(customer_row=existing)
+        result = await upsert_customer(session, "521", "521", "Existente")
+        assert result.c_id == 99
 
 
 # ---------------------------------------------------------------------------
-# Race condition — concurrent first-contact creates
+# DB errors
 # ---------------------------------------------------------------------------
 
-class TestGetOrCreateCustomerRace:
+class TestUpsertCustomerDbErrors:
 
-    def test_integrity_error_triggers_reselect_and_returns_winner(self):
-        """SELECT(None) + commit(IntegrityError) → rollback + re-SELECT devuelve al ganador."""
-        winner = MagicMock(c_id=42, c_whatsapp_id="5215512345678")
-        first_result = MagicMock()
-        first_result.first.return_value = None
-        reselect_result = MagicMock()
-        reselect_result.first.return_value = winner
-
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=False)
-        session.exec.side_effect = [first_result, reselect_result]
-        session.commit.side_effect = IntegrityError("stmt", {}, Exception("duplicate key"))
-
-        with patch("whatsapp_utils.Session", return_value=session):
-            result = _get_or_create_customer("5215512345678", "Juan")
-
-        assert result is winner
-        session.rollback.assert_called_once()
-        assert session.exec.call_count == 2
-
-    def test_integrity_error_with_empty_reselect_reraises(self):
-        """Si el re-SELECT no encuentra el registro (IntegrityError no era por race),
-        re-raise el IntegrityError original para no tragar el error."""
-        first_result = MagicMock()
-        first_result.first.return_value = None
-        reselect_result = MagicMock()
-        reselect_result.first.return_value = None
-
-        session = MagicMock()
-        session.__enter__ = MagicMock(return_value=session)
-        session.__exit__ = MagicMock(return_value=False)
-        session.exec.side_effect = [first_result, reselect_result]
-        session.commit.side_effect = IntegrityError("stmt", {}, Exception("other constraint"))
-
-        with patch("whatsapp_utils.Session", return_value=session):
-            with pytest.raises(IntegrityError):
-                _get_or_create_customer("5215512345678", "Juan")
+    @pytest.mark.asyncio
+    async def test_db_error_propagates(self):
+        session = _make_session(exec_side_effect=Exception("DB error"))
+        with pytest.raises(Exception, match="DB error"):
+            await upsert_customer(session, "521", "521", "Test")

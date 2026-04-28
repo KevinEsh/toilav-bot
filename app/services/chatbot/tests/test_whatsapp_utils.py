@@ -9,15 +9,15 @@ import pytest
 from models import CustomerRow
 from whatsapp_utils import (
     _UNSUPPORTED_TYPE_RESPONSE,
-    Contact,
     UserMessageBuffer,
     WhatsappMessage,
-    _extract_message_text,
+    WhatsappUser,
     _user_buffers,
     encapsulate_text_message,
     is_valid_whatsapp_message,
     parse_text_for_whatsapp,
     process_whatsapp_message,
+    struct_message_from_payload,
 )
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -28,7 +28,7 @@ def _clear_all():
 
 
 def _make_msg(msg_id, timestamp=0, text="", wa_id="test_user"):
-    contact = Contact(wa_id=wa_id, name="Test")
+    contact = WhatsappUser(wa_id=wa_id, name="Test")
     return WhatsappMessage(id=msg_id, contact=contact, timestamp=timestamp, text=text, type="text")
 
 
@@ -127,88 +127,65 @@ class TestUserMessageBuffer:
             await asyncio.sleep(0)
 
 
-# ── _extract_message_text ────────────────────────────────────────────────
+# ── struct_message_from_payload ──────────────────────────────────────────
 
 
-class TestExtractMessageText:
-    def test_text_message(self):
-        msg = {"type": "text", "text": {"body": "Hola mundo"}}
-        assert _extract_message_text(msg) == "Hola mundo"
+def _make_text_payload(wa_id="521", name="Juan", text="Hola", msg_id="wamid.123", ts=1700000000):
+    return {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "contacts": [{"wa_id": wa_id, "profile": {"name": name}}],
+                            "messages": [
+                                {
+                                    "id": msg_id,
+                                    "type": "text",
+                                    "timestamp": str(ts),
+                                    "text": {"body": text},
+                                }
+                            ],
+                            "metadata": {"display_phone_number": "5215550000"},
+                        }
+                    }
+                ]
+            }
+        ]
+    }
 
-    def test_image_without_caption(self):
-        msg = {"type": "image", "image": {"id": "img1"}}
-        result = _extract_message_text(msg)
-        assert result == _UNSUPPORTED_TYPE_RESPONSE["image"]
 
-    def test_image_with_caption(self):
-        msg = {"type": "image", "image": {"id": "img1", "caption": "Mira esto"}}
-        assert _extract_message_text(msg) == "Mira esto"
+class TestStructMessageFromPayload:
+    def test_text_message_returns_whatsapp_message(self):
+        body = _make_text_payload(text="Hola mundo")
+        result = struct_message_from_payload(body)
+        assert isinstance(result, WhatsappMessage)
+        assert result.text == "Hola mundo"
 
-    def test_video_without_caption(self):
-        msg = {"type": "video", "video": {"id": "vid1"}}
-        result = _extract_message_text(msg)
-        assert result == _UNSUPPORTED_TYPE_RESPONSE["video"]
+    def test_contact_info_extracted(self):
+        body = _make_text_payload(wa_id="52999", name="María")
+        result = struct_message_from_payload(body)
+        assert result.contact.wa_id == "52999"
+        assert result.contact.name == "María"
 
-    def test_video_with_caption(self):
-        msg = {"type": "video", "video": {"id": "vid1", "caption": "Mi video"}}
-        assert _extract_message_text(msg) == "Mi video"
+    def test_message_id_extracted(self):
+        body = _make_text_payload(msg_id="wamid.abc")
+        result = struct_message_from_payload(body)
+        assert result.id == "wamid.abc"
 
-    def test_document_without_caption(self):
-        msg = {"type": "document", "document": {"id": "doc1"}}
-        result = _extract_message_text(msg)
-        assert result == _UNSUPPORTED_TYPE_RESPONSE["document"]
+    def test_non_text_type_returns_none(self):
+        body = _make_text_payload()
+        body["entry"][0]["changes"][0]["value"]["messages"][0]["type"] = "image"
+        result = struct_message_from_payload(body)
+        assert result is None
 
-    def test_document_with_caption(self):
-        msg = {"type": "document", "document": {"id": "doc1", "caption": "Factura"}}
-        assert _extract_message_text(msg) == "Factura"
+    def test_malformed_payload_returns_none(self):
+        result = struct_message_from_payload({"entry": []})
+        assert result is None
 
-    def test_audio(self):
-        msg = {"type": "audio", "audio": {"id": "aud1"}}
-        result = _extract_message_text(msg)
-        assert result == _UNSUPPORTED_TYPE_RESPONSE["audio"]
-
-    def test_sticker(self):
-        msg = {"type": "sticker", "sticker": {"id": "stk1"}}
-        result = _extract_message_text(msg)
-        assert result == _UNSUPPORTED_TYPE_RESPONSE["sticker"]
-
-    def test_location(self):
-        msg = {"type": "location", "location": {"latitude": 19.4, "longitude": -99.1}}
-        result = _extract_message_text(msg)
-        assert result == _UNSUPPORTED_TYPE_RESPONSE["location"]
-
-    def test_contacts(self):
-        msg = {"type": "contacts", "contacts": [{"name": {"formatted_name": "Pedro"}}]}
-        result = _extract_message_text(msg)
-        assert result == _UNSUPPORTED_TYPE_RESPONSE["contacts"]
-
-    def test_reaction_returns_none(self):
-        msg = {"type": "reaction", "reaction": {"message_id": "wamid.x", "emoji": "👍"}}
-        assert _extract_message_text(msg) is None
-
-    def test_interactive_button_reply(self):
-        msg = {
-            "type": "interactive",
-            "interactive": {
-                "type": "button_reply",
-                "button_reply": {"id": "btn1", "title": "Sí, quiero"},
-            },
-        }
-        assert _extract_message_text(msg) == "Sí, quiero"
-
-    def test_interactive_list_reply(self):
-        msg = {
-            "type": "interactive",
-            "interactive": {
-                "type": "list_reply",
-                "list_reply": {"id": "lst1", "title": "Opción 2", "description": "Desc"},
-            },
-        }
-        assert _extract_message_text(msg) == "Opción 2"
-
-    def test_unknown_type_returns_none(self):
-        msg = {"type": "some_future_type"}
-        assert _extract_message_text(msg) is None
+    def test_empty_payload_returns_none(self):
+        result = struct_message_from_payload({})
+        assert result is None
 
 
 # ── parse_text_for_whatsapp ──────────────────────────────────────────────
@@ -274,24 +251,22 @@ class TestProcessWhatsAppMessage:
             patch("whatsapp_utils.DEBOUNCE_SECONDS", 0),
             patch("whatsapp_utils.get_session", _null_session),
             patch(
-                "whatsapp_utils._get_or_create_customer",
+                "whatsapp_utils.upsert_customer",
                 new_callable=AsyncMock,
                 return_value=customer,
             ),
-            patch(
-                "whatsapp_utils._load_conversation_history", new_callable=AsyncMock, return_value=[]
-            ),
-            patch("whatsapp_utils._persist_message", new_callable=AsyncMock, return_value=1),
-            patch("whatsapp_utils._update_message_status", new_callable=AsyncMock),
-            patch("whatsapp_utils._persist_conversation_history", new_callable=AsyncMock),
-            patch("whatsapp_utils._store_cache") as mock_sc,
-            patch("whatsapp_utils._products_cache") as mock_pc,
+            patch("whatsapp_utils.load_conversation", new_callable=AsyncMock, return_value=[]),
+            patch("whatsapp_utils.insert_message", new_callable=AsyncMock, return_value=1),
+            patch("whatsapp_utils.update_message_status", new_callable=AsyncMock),
+            patch("whatsapp_utils.update_conversation", new_callable=AsyncMock),
+            patch("whatsapp_utils.store_cache") as mock_sc,
+            patch("whatsapp_utils.products_cache") as mock_pc,
             patch(
                 "whatsapp_utils.agent_generate_response",
                 new_callable=AsyncMock,
                 return_value=("Respuesta", []),
             ) as mock_gen,
-            patch("whatsapp_utils.send_message", new_callable=AsyncMock) as mock_send,
+            patch("whatsapp_utils.send_text_message", new_callable=AsyncMock) as mock_send,
         ):
             mock_sc.aget = AsyncMock(return_value=MagicMock())
             mock_pc.aget = AsyncMock(return_value="")
@@ -309,24 +284,22 @@ class TestProcessWhatsAppMessage:
             patch("whatsapp_utils.DEBOUNCE_SECONDS", 0),
             patch("whatsapp_utils.get_session", _null_session),
             patch(
-                "whatsapp_utils._get_or_create_customer",
+                "whatsapp_utils.upsert_customer",
                 new_callable=AsyncMock,
                 return_value=customer,
             ),
-            patch(
-                "whatsapp_utils._load_conversation_history", new_callable=AsyncMock, return_value=[]
-            ),
-            patch("whatsapp_utils._persist_message", new_callable=AsyncMock, return_value=1),
-            patch("whatsapp_utils._update_message_status", new_callable=AsyncMock),
-            patch("whatsapp_utils._persist_conversation_history", new_callable=AsyncMock),
-            patch("whatsapp_utils._store_cache") as mock_sc,
-            patch("whatsapp_utils._products_cache") as mock_pc,
+            patch("whatsapp_utils.load_conversation", new_callable=AsyncMock, return_value=[]),
+            patch("whatsapp_utils.insert_message", new_callable=AsyncMock, return_value=1),
+            patch("whatsapp_utils.update_message_status", new_callable=AsyncMock),
+            patch("whatsapp_utils.update_conversation", new_callable=AsyncMock),
+            patch("whatsapp_utils.store_cache") as mock_sc,
+            patch("whatsapp_utils.products_cache") as mock_pc,
             patch(
                 "whatsapp_utils.agent_generate_response",
                 new_callable=AsyncMock,
                 return_value=("OK", []),
             ) as mock_gen,
-            patch("whatsapp_utils.send_message", new_callable=AsyncMock),
+            patch("whatsapp_utils.send_text_message", new_callable=AsyncMock),
         ):
             mock_sc.aget = AsyncMock(return_value=MagicMock())
             mock_pc.aget = AsyncMock(return_value="")
@@ -339,7 +312,7 @@ class TestProcessWhatsAppMessage:
     @pytest.mark.asyncio
     async def test_unsupported_type_is_ignored(self, sample_whatsapp_image_body):
         """Image without caption has empty text — silently ignored (no LLM, no send)."""
-        with patch("whatsapp_utils.send_message", new_callable=AsyncMock) as mock_send:
+        with patch("whatsapp_utils.send_text_message", new_callable=AsyncMock) as mock_send:
             await process_whatsapp_message(sample_whatsapp_image_body)
             mock_send.assert_not_called()
 
@@ -371,7 +344,7 @@ class TestProcessWhatsAppMessage:
                 }
             ],
         }
-        with patch("whatsapp_utils.send_message", new_callable=AsyncMock) as mock_send:
+        with patch("whatsapp_utils.send_text_message", new_callable=AsyncMock) as mock_send:
             await process_whatsapp_message(body)
             mock_send.assert_not_called()
 
@@ -387,6 +360,10 @@ class TestProcessWhatsAppMessage:
                         "changes": [
                             {
                                 "value": {
+                                    "metadata": {
+                                        "display_phone_number": "5215550000000",
+                                        "phone_number_id": "123456789",
+                                    },
                                     "contacts": [
                                         {"profile": {"name": "Juan"}, "wa_id": "5215512345678"}
                                     ],
@@ -411,24 +388,22 @@ class TestProcessWhatsAppMessage:
             patch("whatsapp_utils.DEBOUNCE_SECONDS", 0.01),
             patch("whatsapp_utils.get_session", _null_session),
             patch(
-                "whatsapp_utils._get_or_create_customer",
+                "whatsapp_utils.upsert_customer",
                 new_callable=AsyncMock,
                 return_value=customer,
             ),
-            patch(
-                "whatsapp_utils._load_conversation_history", new_callable=AsyncMock, return_value=[]
-            ),
-            patch("whatsapp_utils._persist_message", new_callable=AsyncMock, return_value=1),
-            patch("whatsapp_utils._update_message_status", new_callable=AsyncMock),
-            patch("whatsapp_utils._persist_conversation_history", new_callable=AsyncMock),
-            patch("whatsapp_utils._store_cache") as mock_sc,
-            patch("whatsapp_utils._products_cache") as mock_pc,
+            patch("whatsapp_utils.load_conversation", new_callable=AsyncMock, return_value=[]),
+            patch("whatsapp_utils.insert_message", new_callable=AsyncMock, return_value=1),
+            patch("whatsapp_utils.update_message_status", new_callable=AsyncMock),
+            patch("whatsapp_utils.update_conversation", new_callable=AsyncMock),
+            patch("whatsapp_utils.store_cache") as mock_sc,
+            patch("whatsapp_utils.products_cache") as mock_pc,
             patch(
                 "whatsapp_utils.agent_generate_response",
                 new_callable=AsyncMock,
                 return_value=("OK", []),
             ) as mock_gen,
-            patch("whatsapp_utils.send_message", new_callable=AsyncMock),
+            patch("whatsapp_utils.send_text_message", new_callable=AsyncMock),
         ):
             mock_sc.aget = AsyncMock(return_value=MagicMock())
             mock_pc.aget = AsyncMock(return_value="")
@@ -453,24 +428,22 @@ class TestProcessWhatsAppMessage:
             patch("whatsapp_utils.DEBOUNCE_SECONDS", 0),
             patch("whatsapp_utils.get_session", _null_session),
             patch(
-                "whatsapp_utils._get_or_create_customer",
+                "whatsapp_utils.upsert_customer",
                 new_callable=AsyncMock,
                 return_value=customer,
             ),
-            patch(
-                "whatsapp_utils._load_conversation_history", new_callable=AsyncMock, return_value=[]
-            ),
-            patch("whatsapp_utils._persist_message", new_callable=AsyncMock, return_value=1),
-            patch("whatsapp_utils._update_message_status", new_callable=AsyncMock),
-            patch("whatsapp_utils._persist_conversation_history", new_callable=AsyncMock),
-            patch("whatsapp_utils._store_cache") as mock_sc,
-            patch("whatsapp_utils._products_cache") as mock_pc,
+            patch("whatsapp_utils.load_conversation", new_callable=AsyncMock, return_value=[]),
+            patch("whatsapp_utils.insert_message", new_callable=AsyncMock, return_value=1),
+            patch("whatsapp_utils.update_message_status", new_callable=AsyncMock),
+            patch("whatsapp_utils.update_conversation", new_callable=AsyncMock),
+            patch("whatsapp_utils.store_cache") as mock_sc,
+            patch("whatsapp_utils.products_cache") as mock_pc,
             patch(
                 "whatsapp_utils.agent_generate_response",
                 new_callable=AsyncMock,
                 return_value=("OK", []),
             ),
-            patch("whatsapp_utils.send_message", new_callable=AsyncMock),
+            patch("whatsapp_utils.send_text_message", new_callable=AsyncMock),
         ):
             mock_sc.aget = AsyncMock(return_value=MagicMock())
             mock_pc.aget = AsyncMock(return_value="")

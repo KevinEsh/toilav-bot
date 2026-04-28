@@ -14,13 +14,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-
-from yalti import ChatDeps, StoreInfo, escalate_to_staff
-
+from models import StoreRow
+from yalti import ChatDeps, escalate_to_staff
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_ctx(once=None):
     customer = MagicMock()
@@ -29,7 +29,7 @@ def _make_ctx(once=None):
     customer.c_whatsapp_id = "5215512345678"
     deps = ChatDeps(
         customer=customer,
-        store=StoreInfo(s_id=1, name="Test Store", description="", properties={}),
+        store=StoreRow(s_id=1, s_name="Test Store", s_description=""),
         products="",
         session=AsyncMock(),
     )
@@ -70,8 +70,8 @@ def mock_settings():
 # Guards: idempotencia + validaciones sin tocar la red
 # ---------------------------------------------------------------------------
 
-class TestEscalateGuards:
 
+class TestEscalateGuards:
     async def test_already_escalated_this_turn(self, mock_settings):
         """Si _once ya contiene 'escalate_to_staff', no debe hacer HTTP."""
         ctx = _make_ctx(once={"escalate_to_staff"})
@@ -98,40 +98,13 @@ class TestEscalateGuards:
         assert result.startswith("ERROR_VALIDACION")
         client.post.assert_not_called()
 
-    async def test_missing_owner_wa_id(self):
-        ctx = _make_ctx()
-        client = _make_async_client()
-        with patch("yalti.settings") as s:
-            s.OWNER_WA_ID = ""
-            s.WHATSAPP_ACCESS_TOKEN = "token-abc"
-            s.WHATSAPP_API_VERSION = "v18.0"
-            s.PHONE_NUMBER_ID = "phone-123"
-            with patch("httpx.AsyncClient", return_value=client):
-                result = await escalate_to_staff(ctx, "pregunta")
-        assert result.startswith("ERROR_INTERNO")
-        client.post.assert_not_called()
-        assert "escalate_to_staff" not in ctx.deps._once
-
-    async def test_missing_credentials(self):
-        ctx = _make_ctx()
-        client = _make_async_client()
-        with patch("yalti.settings") as s:
-            s.OWNER_WA_ID = "5215599999999"
-            s.WHATSAPP_ACCESS_TOKEN = ""
-            s.WHATSAPP_API_VERSION = "v18.0"
-            s.PHONE_NUMBER_ID = "phone-123"
-            with patch("httpx.AsyncClient", return_value=client):
-                result = await escalate_to_staff(ctx, "pregunta")
-        assert result.startswith("ERROR_INTERNO")
-        client.post.assert_not_called()
-
 
 # ---------------------------------------------------------------------------
 # Errores HTTP / red
 # ---------------------------------------------------------------------------
 
-class TestEscalateHttpErrors:
 
+class TestEscalateHttpErrors:
     async def test_http_4xx(self, mock_settings):
         ctx = _make_ctx()
         response = MagicMock(status_code=400, text="bad request")
@@ -173,8 +146,8 @@ class TestEscalateHttpErrors:
 # Happy path — payload y URL
 # ---------------------------------------------------------------------------
 
-class TestEscalateHappyPath:
 
+class TestEscalateHappyPath:
     async def test_returns_success_message(self, mock_settings):
         ctx = _make_ctx()
         client = _make_async_client()

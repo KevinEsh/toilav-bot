@@ -14,7 +14,8 @@ if _chatbot_dir not in sys.path:
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from yalti import ChatDeps, StoreInfo, cancel_order
+from models import StoreRow
+from yalti import ChatDeps, cancel_order
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ def _make_ctx(active_order_id=99, session=None):
     customer.c_name = "Test User"
     deps = ChatDeps(
         customer=customer,
-        store=StoreInfo(s_id=1, name="Test Store", description="", properties={}),
+        store=StoreRow(s_id=1, s_name="Test Store", s_description=""),
         products="",
         session=session or AsyncMock(),
         active_order_id=active_order_id,

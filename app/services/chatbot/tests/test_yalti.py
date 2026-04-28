@@ -3,7 +3,8 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from yalti import ChatDeps, StoreInfo, agent_generate_response
+from models import StoreRow
+from yalti import ChatDeps, agent_generate_response
 
 
 class TestChatDeps:
@@ -13,7 +14,7 @@ class TestChatDeps:
         customer.c_id = 1
         customer.c_name = "Juan"
         customer.c_whatsapp_id = "521551234"
-        store = StoreInfo(s_id=1, name="Tienda", description="", properties={})
+        store = StoreRow(s_id=1, s_name="Tienda", s_description="")
         deps = ChatDeps(customer=customer, store=store, products="", session=session)
         assert deps.active_order_id is None
         assert deps._once == set()
