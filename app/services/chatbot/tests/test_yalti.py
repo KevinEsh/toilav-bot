@@ -16,5 +16,5 @@ class TestChatDeps:
         customer.c_whatsapp_id = "521551234"
         store = StoreRow(s_id=1, s_name="Tienda", s_description="")
         deps = ChatDeps(customer=customer, store=store, products="", session=session)
-        assert deps.active_order_id is None
+        assert deps.active_order is None
         assert deps._once == set()

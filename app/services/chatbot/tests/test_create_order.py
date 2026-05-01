@@ -14,7 +14,7 @@ if _chatbot_dir not in sys.path:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from models import StoreRow
+from models import OrderRow, StoreRow
 from yalti import ChatDeps, create_order
 
 
@@ -22,7 +22,7 @@ from yalti import ChatDeps, create_order
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_ctx(active_order_id=None, session=None, products=None):
+def _make_ctx(active_order=None, session=None, products=None):
     """Minimal RunContext-like object with ChatDeps."""
     customer = MagicMock()
     customer.c_id = 1
@@ -35,7 +35,7 @@ def _make_ctx(active_order_id=None, session=None, products=None):
         store=store,
         products=products if products is not None else FAKE_PRODUCTS,
         session=session or AsyncMock(),
-        active_order_id=active_order_id,
+        active_order=active_order,
     )
     ctx = MagicMock()
     ctx.deps = deps
@@ -70,21 +70,21 @@ class TestCreateOrderValidations:
         ctx = _make_ctx()
         result = await create_order(ctx, items=[], delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_empty_delivery_address(self):
         ctx = _make_ctx()
         result = await create_order(ctx, items=VALID_ITEMS, delivery_address="")
         assert result.startswith("ERROR_VALIDACION:")
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_whitespace_delivery_address(self):
         ctx = _make_ctx()
         result = await create_order(ctx, items=VALID_ITEMS, delivery_address="   ")
         assert result.startswith("ERROR_VALIDACION:")
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_unknown_p_id(self):
@@ -93,7 +93,7 @@ class TestCreateOrderValidations:
         result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert "p_id=999" in result
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_units_zero(self):
@@ -101,7 +101,7 @@ class TestCreateOrderValidations:
         items = [{"p_id": 1, "units": 0}]
         result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_units_negative(self):
@@ -109,7 +109,7 @@ class TestCreateOrderValidations:
         items = [{"p_id": 1, "units": -3}]
         result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_item_not_a_dict(self):
@@ -117,7 +117,7 @@ class TestCreateOrderValidations:
         items = ["almendras 2 unidades"]  # cadena en lugar de dict
         result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_item_missing_units_field(self):
@@ -125,7 +125,7 @@ class TestCreateOrderValidations:
         items = [{"p_id": 1}]  # falta units
         result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_item_missing_p_id_field(self):
@@ -133,7 +133,7 @@ class TestCreateOrderValidations:
         items = [{"units": 2}]  # falta p_id
         result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_multiple_errors_all_reported(self):
@@ -146,7 +146,7 @@ class TestCreateOrderValidations:
         result = await create_order(ctx, items=items, delivery_address=VALID_ADDRESS)
         assert result.startswith("ERROR_VALIDACION:")
         assert "p_id=999" in result
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
 
 # ---------------------------------------------------------------------------
@@ -171,27 +171,34 @@ class TestCreateOrderHappyPath:
         return session
 
     @pytest.mark.asyncio
-    async def test_creates_order_and_sets_active_order_id(self):
+    async def test_creates_order_and_sets_active_order(self):
+        from decimal import Decimal
         session = self._make_session_for_create()
         ctx = _make_ctx(session=session)
+        fake_order = OrderRow(
+            o_id=42, o_total=Decimal("0"), o_subtotal=Decimal("0"),
+            o_shipping_amount=Decimal("20"), o_currency="MXN", o_customer_notes="", o_status="PENDING_STORE_APPROVAL",
+        )
 
         with patch("yalti.order_summary", new=AsyncMock(return_value="🛍️ Resumen del pedido")), \
+             patch("yalti.load_order", new=AsyncMock(return_value=fake_order)), \
              patch("yalti._send_whatsapp_text"):
             result = await create_order(ctx, items=VALID_ITEMS, delivery_address=VALID_ADDRESS)
 
         assert result == "🛍️ Resumen del pedido"
-        assert ctx.deps.active_order_id == 42
+        assert ctx.deps.active_order is not None
+        assert ctx.deps.active_order.o_id == 42
         session.commit.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_active_order_id_stays_none_after_validation_error(self):
-        """Garantiza idempotencia: si falla validación, active_order_id no se toca."""
+    async def test_active_order_stays_none_after_validation_error(self):
+        """Garantiza idempotencia: si falla validación, active_order no se toca."""
         ctx = _make_ctx()
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
         await create_order(ctx, items=[], delivery_address=VALID_ADDRESS)
 
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None
 
     @pytest.mark.asyncio
     async def test_db_exception_returns_error_interno(self):
@@ -203,4 +210,4 @@ class TestCreateOrderHappyPath:
         result = await create_order(ctx, items=VALID_ITEMS, delivery_address=VALID_ADDRESS)
 
         assert result.startswith("ERROR_INTERNO:")
-        assert ctx.deps.active_order_id is None
+        assert ctx.deps.active_order is None

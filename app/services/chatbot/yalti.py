@@ -8,8 +8,8 @@ import httpx
 import whatsapp_client
 from config import settings
 from database import get_session
-from dbutils import load_orderitem
-from models import CustomerRow, ProductRow, StoreRow
+from dbutils import load_order, load_orderitem
+from models import CustomerRow, OrderRow, ProductRow, StoreRow
 from pydantic_ai import Agent, ModelSettings, RunContext
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.messages import ModelResponse, ToolCallPart
@@ -64,7 +64,7 @@ class ChatDeps:
     store: StoreRow
     products: dict[str, ProductRow]
     session: AsyncSession  # shared session for the duration of the agent run
-    active_order_id: int | None = None  # pre-loaded; tools write back here after create_order
+    active_order: OrderRow | None = None  # pre-loaded; tools write back here after create_order
     _once: set[str] = field(default_factory=set)  # tools allowed only once per run
 
 
@@ -117,14 +117,14 @@ async def _hide_when_order_exists(
     ctx: RunContext[ChatDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
     """Hides the tool when an active order already exists."""
-    return None if ctx.deps.active_order_id is not None else tool_def
+    return None if ctx.deps.active_order is not None else tool_def
 
 
 async def _hide_when_no_order(
     ctx: RunContext[ChatDeps], tool_def: ToolDefinition
 ) -> ToolDefinition | None:
     """Hides the tool when there is no active order."""
-    return tool_def if ctx.deps.active_order_id is not None else None
+    return tool_def if ctx.deps.active_order is not None else None
 
 
 async def _hide_when_shown(
@@ -350,7 +350,7 @@ async def create_order(
         await session.commit()
         logger.info(f"create_order[{c_id=}, {o_id=}]: commit OK")
 
-        ctx.deps.active_order_id = o_id
+        ctx.deps.active_order = await load_order(session, o_id)
 
     except Exception as e:
         logger.error(f"create_order[{c_id=}]: fallo — {e}")
@@ -393,7 +393,7 @@ async def add_order_item(ctx: RunContext[ChatDeps], p_id: int, units: int) -> st
     if units < 1:
         return f"ERROR_VALIDACION: units debe ser >= 1, recibido: {units}."
 
-    o_id = ctx.deps.active_order_id
+    o_id = ctx.deps.active_order.o_id
     c_id = ctx.deps.customer.c_id
     logger.info(f"add_order_item[{c_id=}, {o_id=}]: {p_id=}, {units=}")
 
@@ -437,7 +437,7 @@ async def reduce_order_item(ctx: RunContext[ChatDeps], p_id: int, units: int) ->
     if units < 1:
         return f"ERROR_VALIDACION: units debe ser >= 1, recibido: {units}."
 
-    o_id = ctx.deps.active_order_id
+    o_id = ctx.deps.active_order.o_id
     c_id = ctx.deps.customer.c_id
     logger.info(f"reduce_order_item[{c_id=}, {o_id=}]: {p_id=}, {units=}")
 
@@ -492,7 +492,7 @@ async def set_order_item_units(ctx: RunContext[ChatDeps], p_id: int, units: int)
     if units < 1:
         return f"ERROR_VALIDACION: units debe ser >= 1, recibido: {units}."
 
-    o_id = ctx.deps.active_order_id
+    o_id = ctx.deps.active_order.o_id
     c_id = ctx.deps.customer.c_id
     logger.info(f"set_order_item_units[{c_id=}, {o_id=}]: {p_id=}, {units=}")
 
@@ -526,7 +526,7 @@ async def remove_order_item(ctx: RunContext[ChatDeps], p_id: int) -> str:
     if p_id not in ctx.deps.products:
         return f"ERROR_VALIDACION: p_id={p_id} no existe en el catálogo."
 
-    o_id = ctx.deps.active_order_id
+    o_id = ctx.deps.active_order.o_id
     c_id = ctx.deps.customer.c_id
     logger.info(f"remove_order_item[{c_id=}, {o_id=}]: {p_id=}")
 
@@ -569,45 +569,37 @@ async def cancel_order(ctx: RunContext[ChatDeps]) -> str:
     Úsala cuando el cliente pida cancelar explícitamente su pedido en curso.
     """
     c_id = ctx.deps.customer.c_id
-    o_id = ctx.deps.active_order_id
+    o_id = ctx.deps.active_order.o_id
     logger.info(f"cancel_order[{c_id=}, {o_id=}]: iniciando")
 
     # --- Escritura a DB ---
     try:
         session = ctx.deps.session
 
-        row = (
-            (
-                await session.execute(
-                    text("SELECT o_id, o_status FROM orders WHERE o_id = :o_id"),
-                    {"o_id": o_id},
-                )
-            )
-            .mappings()
-            .first()
-        )
+        order = await load_order(session, o_id)
+        print(order)
 
-        if row is None:
+        if order is None:
             return f"ERROR_INTERNO: no se encontró el pedido o_id={o_id}."
 
-        if row["o_status"] in {"cancelled", "completed"}:
+        if order.o_status in {"CANCELLED", "COMPLETED"}:
             return (
                 f"ERROR_VALIDACION: el pedido o_id={o_id} ya está en estado "
-                f"{row['o_status']} y no puede cancelarse."
+                f"{order.o_status} y no puede cancelarse."
             )
 
         await session.execute(
-            text("UPDATE orders SET o_status = 'cancelled' WHERE o_id = :o_id"),
+            text("UPDATE orders SET o_status = 'CANCELLED' WHERE o_id = :o_id"),
             {"o_id": o_id},
         )
         await session.commit()
 
-        ctx.deps.active_order_id = None
+        ctx.deps.active_order = None
         logger.info(f"cancel_order[{c_id=}, {o_id=}]: cancelado OK")
-        return f"Pedido o_id={o_id} cancelado."
+        return f"Orden o_id={o_id} transicionó de '{order.o_status}' a 'CANCELLED' exitosamente. No hay orden activa"
 
     except Exception as e:
-        logger.error(f"cancel_order[{c_id=}, {o_id=}]: fallo — {e}")
+        logger.error(f"cancel_order[{c_id=}, {o_id=}]: {e}", exc_info=True)
         return "ERROR_INTERNO: No se pudo cancelar el pedido por un problema técnico. Intenta de nuevo en un momento."
 
 
@@ -627,42 +619,28 @@ async def escalate_to_staff(ctx: RunContext[ChatDeps], message: str) -> str:
         return "El dueño ya fue notificado. No vuelvas a llamar escalate_to_staff en este turno."
 
     customer = ctx.deps.customer
-    c_id = customer.c_id
     if not message or not message.strip():
         return "ERROR_VALIDACION: el mensaje al dueño no puede estar vacío."
 
     ctx.deps._once.add("escalate_to_staff")
     body = f"🔔 Consulta de *{customer.c_name}* ({customer.c_whatsapp_id}):\n\n{message.strip()}"
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": settings.OWNER_WA_ID,
-        "type": "text",
-        "text": {"preview_url": False, "body": body},
-    }
-    headers = {"Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}"}
-    url = (
-        f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}"
-        f"/{settings.PHONE_NUMBER_ID}/messages"
-    )
+    payload = whatsapp_client.encapsulate_text_message(settings.OWNER_WA_ID, body)
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers, timeout=10)
-            response.raise_for_status()
+        await whatsapp_client.post_message(payload)
     except httpx.HTTPStatusError as e:
         logger.error(
-            f"escalate_to_staff[{c_id=}]: HTTP {e.response.status_code} — {e.response.text}"
+            f"escalate_to_staff[{customer.c_id=}]: HTTP {e.response.status_code} — {e.response.text}"
         )
         return "ERROR_INTERNO: no se pudo notificar al dueño. Intenta más tarde."
     except httpx.TimeoutException:
-        logger.error(f"escalate_to_staff[{c_id=}]: timeout")
+        logger.error(f"escalate_to_staff[{customer.c_id=}]: timeout")
         return "ERROR_INTERNO: no se pudo notificar al dueño (timeout). Intenta más tarde."
     except httpx.HTTPError as e:
-        logger.error(f"escalate_to_staff[{c_id=}]: network error — {e}")
+        logger.error(f"escalate_to_staff[{customer.c_id=}]: network error — {e}")
         return "ERROR_INTERNO: no se pudo notificar al dueño. Intenta más tarde."
 
-    logger.info(f"escalate_to_staff[{c_id=}]: dueño notificado")
+    logger.info(f"escalate_to_staff[{customer.c_id=}]: dueño notificado")
     return "Notificación enviada al dueño de la tienda."
 
 
@@ -675,6 +653,7 @@ async def agent_generate_response(
     store: StoreRow,
     products: str,
     history: list,
+    active_order: OrderRow = None,
 ) -> tuple[str, list]:
     """Run the agent and return (response_text, full_message_history).
 
@@ -686,33 +665,41 @@ async def agent_generate_response(
         the full history back to Conversations.cv_history.
     """
     once = _history_tool_calls(history) & {"show_products"}
-    system_prompt = build_mega_prompt(
-        customer_name=customer.c_name,
-        store_name=store.s_name,
-        store_description=store.s_description,
-        products=products,
-    )
 
     async with get_session() as session:
-        # Resolve active order before handing control to the agent.
-        active_res = await session.execute(
-            text("""
-                SELECT o_id FROM orders
-                WHERE o_c_id = :c_id
-                  AND o_status NOT IN ('CANCELLED', 'COMPLETED')
-                ORDER BY o_created_at DESC
-                LIMIT 1
-            """),
-            {"c_id": customer.c_id},
+        # # Resolve active order before handing control to the agent.
+        # active_res = await session.execute(
+        #     text("""
+        #         SELECT o_id FROM orders
+        #         WHERE o_c_id = :c_id
+        #           AND o_status NOT IN ('CANCELLED', 'COMPLETED')
+        #         ORDER BY o_created_at DESC
+        #         LIMIT 1
+        #     """),
+        #     {"c_id": customer.c_id},
+        # )
+        # active_order_id = active_res.scalar()
+
+        # active_order_summary = ""
+        # if active_order_id is not None:
+        #     active_order_summary = await order_summary(session, active_order_id, customer.c_name)
+
+        system_prompt = build_mega_prompt(
+            customer_info=customer,
+            store_name=store.s_name,
+            store_info=store,
+            products_info=products,
+            active_order=active_order,
         )
-        active_order_id = active_res.scalar()
+
+        # print(system_prompt)
 
         deps = ChatDeps(
             customer=customer,
             store=store,
             products=products,
             session=session,
-            active_order_id=active_order_id,
+            active_order=active_order,
             _once=once,
         )
 

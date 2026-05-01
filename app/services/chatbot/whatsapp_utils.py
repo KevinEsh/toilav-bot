@@ -4,10 +4,12 @@ import re
 from collections import OrderedDict
 
 import httpx
+import whatsapp_client
 from config import settings
 from database import get_session
 from dbutils import (
     insert_message,
+    load_active_order,
     load_conversation,
     products_cache,
     store_cache,
@@ -207,17 +209,6 @@ def log_http_response(response: httpx.Response):
     logging.info(f"Status: {response.status_code}")
     logging.info(f"Content-type: {response.headers.get('content-type')}")
     logging.info(f"Body: {response.text}")
-
-
-def encapsulate_text_message(whatsapp_id: str, text: str) -> dict:
-    """Construye el payload para un mensaje de texto saliente."""
-    return {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": whatsapp_id,
-        "type": "text",
-        "text": {"preview_url": False, "body": text},
-    }
 
 
 async def send_text_message(data: dict, whatsapp_id: str) -> httpx.Response | None:
@@ -443,6 +434,7 @@ async def handle_customer_message(incoming_message: WhatsappMessage) -> None:
         async with get_session() as session:
             customer = await upsert_customer(session, wa_id, phone, name)
             history = await load_conversation(session, customer.c_id)
+            active_order = await load_active_order(session, customer.c_id)
             store = await store_cache.aget(session)
             products = await products_cache.aget(session)
             inbound_id = await insert_message(session, customer.c_id, "INBOUND", combined_messages)
@@ -454,6 +446,7 @@ async def handle_customer_message(incoming_message: WhatsappMessage) -> None:
             store=store,
             products=products,
             history=history,
+            active_order=active_order,
         )
 
         response_text = parse_text_for_whatsapp(response_text)
@@ -464,7 +457,7 @@ async def handle_customer_message(incoming_message: WhatsappMessage) -> None:
             await update_message_status(session, inbound_id, "PROCESSED")
             await update_conversation(session, customer.c_id, all_messages)
 
-        outbound_message = encapsulate_text_message(wa_id, response_text)
+        outbound_message = whatsapp_client.encapsulate_text_message(wa_id, response_text)
         await send_text_message(outbound_message, wa_id)
     except Exception:
         logger.exception("Failed to process messages from %s", wa_id)

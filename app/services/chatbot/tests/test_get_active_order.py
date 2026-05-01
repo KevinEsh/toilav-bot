@@ -31,7 +31,8 @@ def _make_session(order_row=None, exec_side_effect=None):
 
 
 def _order_dict(o_id=42, o_total="100.00", o_subtotal="100.00",
-                o_shipping_amount="0.00", o_currency="MXN", o_customer_notes=""):
+                o_shipping_amount="0.00", o_currency="MXN", o_customer_notes="",
+                o_status="consumer_reviewing"):
     return {
         "o_id": o_id,
         "o_total": Decimal(o_total),
@@ -39,6 +40,7 @@ def _order_dict(o_id=42, o_total="100.00", o_subtotal="100.00",
         "o_shipping_amount": Decimal(o_shipping_amount),
         "o_currency": o_currency,
         "o_customer_notes": o_customer_notes,
+        "o_status": o_status,
     }
 
 

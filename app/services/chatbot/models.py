@@ -55,6 +55,7 @@ class OrderRow:
     o_shipping_amount: Decimal
     o_currency: str
     o_customer_notes: str
+    o_status: str
 
 
 @dataclass

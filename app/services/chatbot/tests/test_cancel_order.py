@@ -14,7 +14,9 @@ if _chatbot_dir not in sys.path:
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from models import StoreRow
+from decimal import Decimal
+
+from models import OrderRow, StoreRow
 from yalti import ChatDeps, cancel_order
 
 
@@ -35,20 +37,36 @@ def _make_ctx(active_order_id=99, session=None):
     customer = MagicMock()
     customer.c_id = 1
     customer.c_name = "Test User"
+    active_order = (
+        OrderRow(
+            o_id=active_order_id, o_total=Decimal("0"), o_subtotal=Decimal("0"),
+            o_shipping_amount=Decimal("0"), o_currency="MXN", o_customer_notes="", o_status="PENDING_STORE_APPROVAL",
+        )
+        if active_order_id is not None
+        else None
+    )
     deps = ChatDeps(
         customer=customer,
         store=StoreRow(s_id=1, s_name="Test Store", s_description=""),
         products="",
         session=session or AsyncMock(),
-        active_order_id=active_order_id,
+        active_order=active_order,
     )
     ctx = MagicMock()
     ctx.deps = deps
     return ctx
 
 
-def _order_row(o_id=99, status="pending_store_approval"):
-    return {"o_id": o_id, "o_status": status}
+def _order_row(o_id=99, status="PENDING_STORE_APPROVAL"):
+    return {
+        "o_id": o_id,
+        "o_status": status,
+        "o_total": Decimal("0.00"),
+        "o_subtotal": Decimal("0.00"),
+        "o_shipping_amount": Decimal("0.00"),
+        "o_currency": "MXN",
+        "o_customer_notes": "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -68,33 +86,33 @@ class TestCancelOrderDbValidations:
         assert result.startswith("ERROR_INTERNO:")
         assert "o_id=99" in result
         session.commit.assert_not_called()
-        assert ctx.deps.active_order_id == 99
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99
 
     @pytest.mark.asyncio
     async def test_order_already_cancelled(self):
         """Orden ya cancelada → ERROR_VALIDACION, sin commit."""
-        session = _make_session(order_row=_order_row(status="cancelled"))
+        session = _make_session(order_row=_order_row(status="CANCELLED"))
         ctx = _make_ctx(session=session)
 
         result = await cancel_order(ctx)
 
         assert result.startswith("ERROR_VALIDACION:")
-        assert "cancelled" in result
+        assert "CANCELLED" in result
         session.commit.assert_not_called()
-        assert ctx.deps.active_order_id == 99
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99
 
     @pytest.mark.asyncio
     async def test_order_already_completed(self):
         """Orden completada → ERROR_VALIDACION, sin commit."""
-        session = _make_session(order_row=_order_row(status="completed"))
+        session = _make_session(order_row=_order_row(status="COMPLETED"))
         ctx = _make_ctx(session=session)
 
         result = await cancel_order(ctx)
 
         assert result.startswith("ERROR_VALIDACION:")
-        assert "completed" in result
+        assert "COMPLETED" in result
         session.commit.assert_not_called()
-        assert ctx.deps.active_order_id == 99
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99
 
 
 # ---------------------------------------------------------------------------
@@ -105,26 +123,26 @@ class TestCancelOrderHappyPath:
 
     @pytest.mark.asyncio
     async def test_cancel_pending_approval_order(self):
-        session = _make_session(order_row=_order_row(status="pending_store_approval"))
+        session = _make_session(order_row=_order_row(status="PENDING_STORE_APPROVAL"))
         ctx = _make_ctx(session=session)
 
         result = await cancel_order(ctx)
 
         session.commit.assert_called_once()
-        assert ctx.deps.active_order_id is None
-        assert "cancelado" in result
+        assert ctx.deps.active_order is None
+        assert "CANCELLED" in result
         assert "o_id=99" in result
 
     @pytest.mark.asyncio
     async def test_cancel_consumer_reviewing_order(self):
-        session = _make_session(order_row=_order_row(status="consumer_reviewing"))
+        session = _make_session(order_row=_order_row(status="CONSUMER_REVIEWING"))
         ctx = _make_ctx(session=session)
 
         result = await cancel_order(ctx)
 
         session.commit.assert_called_once()
-        assert ctx.deps.active_order_id is None
-        assert "cancelado" in result
+        assert ctx.deps.active_order is None
+        assert "CANCELLED" in result
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +160,7 @@ class TestCancelOrderDbException:
         result = await cancel_order(ctx)
 
         assert result.startswith("ERROR_INTERNO:")
-        assert ctx.deps.active_order_id == 99
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99
 
     @pytest.mark.asyncio
     async def test_db_exception_on_commit_returns_error_interno(self):
@@ -153,4 +171,4 @@ class TestCancelOrderDbException:
         result = await cancel_order(ctx)
 
         assert result.startswith("ERROR_INTERNO:")
-        assert ctx.deps.active_order_id == 99
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99

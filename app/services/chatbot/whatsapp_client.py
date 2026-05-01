@@ -47,3 +47,14 @@ async def post_message(payload: dict, timeout: float = 10.0) -> httpx.Response:
         response = await client.post(url, json=payload, headers=headers, timeout=timeout)
         response.raise_for_status()
     return response
+
+
+def encapsulate_text_message(whatsapp_id: str, text: str) -> dict:
+    """Construye el payload para un mensaje de texto saliente."""
+    return {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": whatsapp_id,
+        "type": "text",
+        "text": {"preview_url": False, "body": text},
+    }

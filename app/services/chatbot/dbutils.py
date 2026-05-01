@@ -62,7 +62,9 @@ async def load_store(session) -> StoreRow:
 
 async def load_orderitem(session: AsyncSession, o_id: int, p_id: int):
     result = await session.execute(
-        text("SELECT oi_id, oi_units FROM orderitems WHERE oi_o_id = :o_id AND oi_p_id = :p_id"),
+        text(
+            "SELECT oi_id, oi_p_id, oi_units, oi_unit_price FROM orderitems WHERE oi_o_id = :o_id AND oi_p_id = :p_id"
+        ),
         {"o_id": o_id, "p_id": p_id},
     )
     orderitem = result.mappings().first()
@@ -102,7 +104,7 @@ async def order_summary(session: AsyncSession, o_id: int, c_name: str) -> str:
 
 async def load_active_order(session, c_id):
     get_active_order_query = text("""
-        SELECT o_id, o_total, o_subtotal, o_shipping_amount, o_currency, o_customer_notes
+        SELECT o_id, o_total, o_subtotal, o_shipping_amount, o_currency, o_customer_notes, o_status
         FROM orders
         WHERE o_c_id = :c_id
             AND o_status NOT IN ('CANCELLED', 'COMPLETED')
@@ -114,9 +116,25 @@ async def load_active_order(session, c_id):
     order = result.mappings().first()
 
     if order is None:
-        return OrderRow()
+        return None
 
     logger.info("Active order found in DB")
+    return OrderRow(**order)
+
+
+async def load_order(session, o_id: int):
+    get_order_query = text("""
+        SELECT o_id, o_total, o_subtotal, o_shipping_amount, o_currency, o_customer_notes, o_status
+        FROM orders WHERE o_id = :o_id
+    """)
+
+    result = await session.execute(get_order_query, {"o_id": o_id})
+    order = result.mappings().first()
+
+    if order is None:
+        return None
+
+    logger.info("load_order[{o_id=}]: order found in DB")
     return OrderRow(**order)
 
 
@@ -124,7 +142,7 @@ async def load_products(session) -> dict[str, ProductRow]:
     """Lee todos los productos disponibles (pre-computado en la API)."""
     # async with get_session() as session:
     get_products_query = text("""
-        SELECT p_id, p_name, p_sale_price, p_rag_text
+        SELECT p_id, p_name, p_sale_price, p_rag_text, p_currency, p_image_url
         FROM products WHERE p_is_available = true
     """)
 

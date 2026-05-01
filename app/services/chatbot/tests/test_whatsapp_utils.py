@@ -7,13 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from models import CustomerRow
+from whatsapp_client import encapsulate_text_message
 from whatsapp_utils import (
-    _UNSUPPORTED_TYPE_RESPONSE,
     UserMessageBuffer,
     WhatsappMessage,
     WhatsappUser,
     _user_buffers,
-    encapsulate_text_message,
     is_valid_whatsapp_message,
     parse_text_for_whatsapp,
     process_whatsapp_message,

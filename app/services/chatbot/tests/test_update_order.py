@@ -14,7 +14,9 @@ if _chatbot_dir not in sys.path:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from models import OrderItemRow, StoreRow
+from decimal import Decimal
+
+from models import OrderItemRow, OrderRow, StoreRow
 from yalti import (
     ChatDeps,
     add_order_item,
@@ -73,12 +75,20 @@ def _make_ctx(active_order_id=99, session=None, products=None):
     customer = MagicMock()
     customer.c_id = 1
     customer.c_name = "Test User"
+    active_order = (
+        OrderRow(
+            o_id=active_order_id, o_total=Decimal("0"), o_subtotal=Decimal("0"),
+            o_shipping_amount=Decimal("0"), o_currency="MXN", o_customer_notes="", o_status="PENDING_STORE_APPROVAL",
+        )
+        if active_order_id is not None
+        else None
+    )
     deps = ChatDeps(
         customer=customer,
         store=StoreRow(s_id=1, s_name="Test Store"),
         products=products if products is not None else FAKE_PRODUCTS,
         session=session or AsyncMock(),
-        active_order_id=active_order_id,
+        active_order=active_order,
     )
     ctx = MagicMock()
     ctx.deps = deps
