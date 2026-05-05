@@ -1,41 +1,52 @@
-"""Tests for update_order tool in yalti.py.
+"""Tests for the four order-item tools in yalti.py.
 
 Validation failures return before opening a DB session.
-Happy path and DB-error cases mock Session.
+Happy path and DB-error cases patch yalti.get_session with a mock session.
+
+Note: reduce_order_item and remove_order_item now COUNT before mutating
+(check-before-delete), so the execute call order is:
+  SELECT item → COUNT(*) → DELETE/UPDATE → order_summary
+instead of the old:
+  SELECT item → DELETE/UPDATE → COUNT(*) → order_summary
 """
 
 import os
 import sys
 
 _chatbot_dir = os.path.join(os.path.dirname(__file__), "..")
-_db_dir = os.path.normpath(os.path.join(_chatbot_dir, "..", "database"))
-for _p in [_chatbot_dir, _db_dir]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _chatbot_dir not in sys.path:
+    sys.path.insert(0, _chatbot_dir)
 
-from unittest.mock import MagicMock, call, patch
+from contextlib import asynccontextmanager
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from yalti import ChatDeps, StoreInfo, update_order
+from models import OrderItemRow, OrderRow, StoreRow
+from yalti import (
+    ChatDeps,
+    add_order_item,
+    reduce_order_item,
+    remove_order_item,
+    set_order_item_units,
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_ctx(active_order_id=99):
-    customer = MagicMock()
-    customer.c_id = 1
-    customer.c_name = "Test User"
-    deps = ChatDeps(
-        customer=customer,
-        store=StoreInfo(s_id=1, name="Test Store", description="", properties={}),
-        products="",
-        active_order_id=active_order_id,
-    )
-    ctx = MagicMock()
-    ctx.deps = deps
-    return ctx
+def _make_get_session(session):
+    """Returns a get_session replacement that yields the given mock session."""
+    @asynccontextmanager
+    async def _cm():
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+    return _cm
 
 
 def _make_product(p_id, name, price):
@@ -52,95 +63,109 @@ FAKE_PRODUCTS = {
 }
 
 
-def _make_session(existing_item=None, order_items_after=None):
-    """Construye un mock de Session listo para usar como context manager."""
-    mock_order = MagicMock()
-    mock_order.o_id = 99
-
-    mock_session = MagicMock()
-    mock_session.__enter__ = MagicMock(return_value=mock_session)
-    mock_session.__exit__ = MagicMock(return_value=False)
-    mock_session.get.return_value = mock_order
-    mock_session.exec.return_value.first.return_value = existing_item
-
-    # Segunda llamada a exec (all_items tras flush) devuelve la lista post-operación
-    if order_items_after is not None:
-        mock_session.exec.return_value.all.return_value = order_items_after
-
-    return mock_session, mock_order
+def _result(first=None, scalar=0):
+    r = MagicMock()
+    r.mappings.return_value.first.return_value = first
+    r.scalar.return_value = scalar
+    return r
 
 
-def _make_item(p_id, units, unit_price):
-    item = MagicMock()
-    item.oi_p_id = p_id
-    item.oi_units = units
-    item.oi_unit_price = unit_price
-    return item
+def _make_ctx(active_order_id=99, products=None):
+    customer = MagicMock()
+    customer.c_id = 1
+    customer.c_name = "Test User"
+    active_order = (
+        OrderRow(
+            o_id=active_order_id, o_total=Decimal("0"), o_subtotal=Decimal("0"),
+            o_shipping_amount=Decimal("0"), o_currency="MXN", o_customer_notes="", o_status="PENDING_STORE_APPROVAL",
+        )
+        if active_order_id is not None
+        else None
+    )
+    deps = ChatDeps(
+        customer=customer,
+        store=StoreRow(s_id=1, s_name="Test Store"),
+        products=products if products is not None else FAKE_PRODUCTS,
+        active_order=active_order,
+    )
+    ctx = MagicMock()
+    ctx.deps = deps
+    return ctx
+
+
+def _item_row(p_id=1, units=2, unit_price=120.0, oi_id=1):
+    return {"oi_id": oi_id, "oi_p_id": p_id, "oi_units": units, "oi_unit_price": unit_price}
 
 
 # ---------------------------------------------------------------------------
 # Validaciones de entrada (sin DB)
 # ---------------------------------------------------------------------------
 
-class TestUpdateOrderValidations:
+class TestInputValidations:
 
     @pytest.mark.asyncio
-    async def test_unknown_action(self):
+    async def test_add_unknown_p_id(self):
         ctx = _make_ctx()
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await update_order(ctx, action="borrar", p_id=1, units=1)
-        assert result.startswith("ERROR_VALIDACION:")
-        assert "borrar" in result
-
-    @pytest.mark.asyncio
-    async def test_unknown_p_id(self):
-        ctx = _make_ctx()
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await update_order(ctx, action="add", p_id=999, units=1)
+        result = await add_order_item(ctx, p_id=999, units=1)
         assert result.startswith("ERROR_VALIDACION:")
         assert "p_id=999" in result
 
     @pytest.mark.asyncio
     async def test_add_units_zero(self):
         ctx = _make_ctx()
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await update_order(ctx, action="add", p_id=1, units=0)
+        result = await add_order_item(ctx, p_id=1, units=0)
         assert result.startswith("ERROR_VALIDACION:")
 
     @pytest.mark.asyncio
     async def test_add_units_negative(self):
         ctx = _make_ctx()
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await update_order(ctx, action="add", p_id=1, units=-2)
+        result = await add_order_item(ctx, p_id=1, units=-2)
+        assert result.startswith("ERROR_VALIDACION:")
+
+    @pytest.mark.asyncio
+    async def test_reduce_unknown_p_id(self):
+        ctx = _make_ctx()
+        result = await reduce_order_item(ctx, p_id=999, units=1)
         assert result.startswith("ERROR_VALIDACION:")
 
     @pytest.mark.asyncio
     async def test_reduce_units_zero(self):
         ctx = _make_ctx()
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await update_order(ctx, action="reduce_units", p_id=1, units=0)
+        result = await reduce_order_item(ctx, p_id=1, units=0)
+        assert result.startswith("ERROR_VALIDACION:")
+
+    @pytest.mark.asyncio
+    async def test_set_unknown_p_id(self):
+        ctx = _make_ctx()
+        result = await set_order_item_units(ctx, p_id=999, units=1)
         assert result.startswith("ERROR_VALIDACION:")
 
     @pytest.mark.asyncio
     async def test_set_units_zero(self):
         ctx = _make_ctx()
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS):
-            result = await update_order(ctx, action="set_units", p_id=1, units=0)
+        result = await set_order_item_units(ctx, p_id=1, units=0)
         assert result.startswith("ERROR_VALIDACION:")
 
     @pytest.mark.asyncio
-    async def test_remove_ignores_units_value(self):
-        """remove no requiere units >= 1 — la validación no aplica."""
+    async def test_remove_unknown_p_id(self):
         ctx = _make_ctx()
-        existing = _make_item(1, 2, 120.0)
-        remaining = [_make_item(2, 1, 95.0)]  # queda un ítem
-        mock_session, _ = _make_session(existing_item=existing, order_items_after=remaining)
+        result = await remove_order_item(ctx, p_id=999)
+        assert result.startswith("ERROR_VALIDACION:")
 
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session), \
-             patch("yalti._order_summary", return_value="Resumen"):
-            result = await update_order(ctx, action="remove", p_id=1, units=0)
-
+    @pytest.mark.asyncio
+    async def test_remove_item_works_without_units_param(self):
+        """remove_order_item has no units parameter — validate it works fine."""
+        session = AsyncMock()
+        # SELECT item → COUNT(*) returning 2 → DELETE
+        session.execute.side_effect = [
+            _result(first=_item_row(p_id=1), scalar=2),  # load_orderitem
+            _result(scalar=2),                            # COUNT(*)
+            MagicMock(),                                  # DELETE
+        ]
+        ctx = _make_ctx()
+        with patch("yalti.get_session", _make_get_session(session)), \
+             patch("yalti.order_summary", new=AsyncMock(return_value="Resumen")):
+            result = await remove_order_item(ctx, p_id=1)
         assert not result.startswith("ERROR_VALIDACION:")
 
 
@@ -148,147 +173,126 @@ class TestUpdateOrderValidations:
 # Validaciones en DB (ítem no existe, orden vacía)
 # ---------------------------------------------------------------------------
 
-class TestUpdateOrderDbValidations:
+class TestDbValidations:
 
     @pytest.mark.asyncio
-    async def test_reduce_units_item_not_in_order(self):
+    async def test_reduce_item_not_in_order(self):
+        session = AsyncMock()
+        session.execute.return_value = _result(first=None)
         ctx = _make_ctx()
-        mock_session, _ = _make_session(existing_item=None)
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session):
-            result = await update_order(ctx, action="reduce_units", p_id=1, units=1)
+        with patch("yalti.get_session", _make_get_session(session)):
+            result = await reduce_order_item(ctx, p_id=1, units=1)
         assert result.startswith("ERROR_VALIDACION:")
         assert "p_id=1" in result
 
     @pytest.mark.asyncio
-    async def test_set_units_item_not_in_order(self):
+    async def test_set_item_not_in_order(self):
+        session = AsyncMock()
+        session.execute.return_value = _result(first=None)
         ctx = _make_ctx()
-        mock_session, _ = _make_session(existing_item=None)
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session):
-            result = await update_order(ctx, action="set_units", p_id=1, units=2)
+        with patch("yalti.get_session", _make_get_session(session)):
+            result = await set_order_item_units(ctx, p_id=1, units=2)
         assert result.startswith("ERROR_VALIDACION:")
 
     @pytest.mark.asyncio
     async def test_remove_item_not_in_order(self):
+        session = AsyncMock()
+        session.execute.return_value = _result(first=None)
         ctx = _make_ctx()
-        mock_session, _ = _make_session(existing_item=None)
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session):
-            result = await update_order(ctx, action="remove", p_id=1, units=0)
+        with patch("yalti.get_session", _make_get_session(session)):
+            result = await remove_order_item(ctx, p_id=1)
         assert result.startswith("ERROR_VALIDACION:")
-
-    @pytest.mark.asyncio
-    async def test_order_not_found_in_db(self):
-        ctx = _make_ctx()
-        mock_session, _ = _make_session()
-        mock_session.get.return_value = None  # orden no existe
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session):
-            result = await update_order(ctx, action="add", p_id=1, units=1)
-        assert result.startswith("ERROR_INTERNO:")
 
     @pytest.mark.asyncio
     async def test_last_item_removal_blocked(self):
-        """Eliminar el único ítem debe rechazarse con ERROR_VALIDACION y hacer rollback."""
+        """Eliminar el único ítem debe rechazarse con ERROR_VALIDACION."""
+        session = AsyncMock()
+        # SELECT item → COUNT(*) returning 1 → no DELETE
+        session.execute.side_effect = [
+            _result(first=_item_row(), scalar=1),  # load_orderitem
+            _result(scalar=1),                      # COUNT(*) — only 1 item
+        ]
         ctx = _make_ctx()
-        existing = _make_item(1, 2, 120.0)
-        mock_session, _ = _make_session(existing_item=existing, order_items_after=[])
-
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session):
-            result = await update_order(ctx, action="remove", p_id=1, units=0)
-
+        with patch("yalti.get_session", _make_get_session(session)):
+            result = await remove_order_item(ctx, p_id=1)
         assert result.startswith("ERROR_VALIDACION:")
         assert "cancel_order" in result
-        mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_reduce_units_to_zero_leaves_no_items_blocked(self):
-        """reduce_units que deja la orden vacía debe rechazarse."""
+    async def test_reduce_to_zero_leaves_no_items_blocked(self):
+        """reduce_order_item que vacía la orden debe rechazarse."""
+        session = AsyncMock()
+        # SELECT item(units=2) → COUNT(*) returning 1 → no DELETE
+        session.execute.side_effect = [
+            _result(first=_item_row(units=2), scalar=1),  # load_orderitem
+            _result(scalar=1),                             # COUNT(*) — only 1 item
+        ]
         ctx = _make_ctx()
-        existing = _make_item(1, 2, 120.0)
-        mock_session, _ = _make_session(existing_item=existing, order_items_after=[])
-
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session):
-            result = await update_order(ctx, action="reduce_units", p_id=1, units=2)
-
+        with patch("yalti.get_session", _make_get_session(session)):
+            result = await reduce_order_item(ctx, p_id=1, units=2)
         assert result.startswith("ERROR_VALIDACION:")
-        mock_session.rollback.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
 
-class TestUpdateOrderHappyPath:
+class TestHappyPath:
 
     @pytest.mark.asyncio
     async def test_add_new_item(self):
+        session = AsyncMock()
+        session.execute.side_effect = [_result(first=None), MagicMock()]
         ctx = _make_ctx()
-        new_item = _make_item(1, 2, 120.0)
-        mock_session, _ = _make_session(existing_item=None, order_items_after=[new_item])
-
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session), \
-             patch("yalti._order_summary", return_value="Resumen"):
-            result = await update_order(ctx, action="add", p_id=1, units=2)
-
+        with patch("yalti.get_session", _make_get_session(session)), \
+             patch("yalti.order_summary", new=AsyncMock(return_value="Resumen")):
+            result = await add_order_item(ctx, p_id=1, units=2)
         assert result == "Pedido actualizado:\nResumen"
-        mock_session.commit.assert_called_once()
+        session.commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_add_existing_item_increases_units(self):
+        session = AsyncMock()
+        session.execute.side_effect = [_result(first=_item_row(units=1)), MagicMock()]
         ctx = _make_ctx()
-        existing = _make_item(1, 1, 120.0)
-        mock_session, _ = _make_session(existing_item=existing, order_items_after=[existing])
-
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session), \
-             patch("yalti._order_summary", return_value="Resumen"):
-            result = await update_order(ctx, action="add", p_id=1, units=3)
-
-        assert existing.oi_units == 4
+        with patch("yalti.get_session", _make_get_session(session)), \
+             patch("yalti.order_summary", new=AsyncMock(return_value="Resumen")):
+            result = await add_order_item(ctx, p_id=1, units=3)
         assert result == "Pedido actualizado:\nResumen"
+        session.commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_set_units(self):
+        session = AsyncMock()
+        session.execute.side_effect = [_result(first=_item_row(units=5)), MagicMock()]
         ctx = _make_ctx()
-        existing = _make_item(1, 5, 120.0)
-        mock_session, _ = _make_session(existing_item=existing, order_items_after=[existing])
-
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session), \
-             patch("yalti._order_summary", return_value="Resumen"):
-            result = await update_order(ctx, action="set_units", p_id=1, units=2)
-
-        assert existing.oi_units == 2
+        with patch("yalti.get_session", _make_get_session(session)), \
+             patch("yalti.order_summary", new=AsyncMock(return_value="Resumen")):
+            result = await set_order_item_units(ctx, p_id=1, units=2)
         assert result == "Pedido actualizado:\nResumen"
+        session.commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_remove_item_with_others_remaining(self):
+        session = AsyncMock()
+        # SELECT item → COUNT(*) returning 2 → DELETE
+        session.execute.side_effect = [
+            _result(first=_item_row(p_id=1), scalar=2),  # load_orderitem
+            _result(scalar=2),                            # COUNT(*)
+            MagicMock(),                                  # DELETE
+        ]
         ctx = _make_ctx()
-        existing = _make_item(1, 2, 120.0)
-        remaining = [_make_item(2, 1, 95.0)]
-        mock_session, _ = _make_session(existing_item=existing, order_items_after=remaining)
-
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session), \
-             patch("yalti._order_summary", return_value="Resumen"):
-            result = await update_order(ctx, action="remove", p_id=1, units=0)
-
-        mock_session.delete.assert_called_once_with(existing)
+        with patch("yalti.get_session", _make_get_session(session)), \
+             patch("yalti.order_summary", new=AsyncMock(return_value="Resumen")):
+            result = await remove_order_item(ctx, p_id=1)
         assert result == "Pedido actualizado:\nResumen"
+        session.commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_db_exception_returns_error_interno(self):
+        session = AsyncMock()
+        session.execute.side_effect = Exception("DB timeout")
         ctx = _make_ctx()
-        mock_session, _ = _make_session()
-        mock_session.get.side_effect = Exception("DB timeout")
-
-        with patch("yalti.PRODUCTS", FAKE_PRODUCTS), \
-             patch("yalti.Session", return_value=mock_session):
-            result = await update_order(ctx, action="add", p_id=1, units=1)
-
+        with patch("yalti.get_session", _make_get_session(session)):
+            result = await add_order_item(ctx, p_id=1, units=1)
         assert result.startswith("ERROR_INTERNO:")

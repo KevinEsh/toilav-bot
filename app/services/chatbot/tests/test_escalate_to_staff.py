@@ -7,22 +7,20 @@ import os
 import sys
 
 _chatbot_dir = os.path.join(os.path.dirname(__file__), "..")
-_db_dir = os.path.normpath(os.path.join(_chatbot_dir, "..", "database"))
-for _p in [_chatbot_dir, _db_dir]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _chatbot_dir not in sys.path:
+    sys.path.insert(0, _chatbot_dir)
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-
-from yalti import ChatDeps, StoreInfo, escalate_to_staff
-
+from models import StoreRow
+from yalti import ChatDeps, escalate_to_staff
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_ctx(once=None):
     customer = MagicMock()
@@ -31,7 +29,7 @@ def _make_ctx(once=None):
     customer.c_whatsapp_id = "5215512345678"
     deps = ChatDeps(
         customer=customer,
-        store=StoreInfo(s_id=1, name="Test Store", description="", properties={}),
+        store=StoreRow(s_id=1, s_name="Test Store", s_description=""),
         products="",
     )
     if once:
@@ -71,14 +69,24 @@ def mock_settings():
 # Guards: idempotencia + validaciones sin tocar la red
 # ---------------------------------------------------------------------------
 
+
 class TestEscalateGuards:
+    async def test_customer_did_not_confirm_escalation(self):
+        """Si customer_wanted_to_escalate=False, no debe hacer HTTP y pide que pregunte primero."""
+        ctx = _make_ctx()
+        client = _make_async_client()
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=False)
+        assert result.startswith("ACCION_REQUERIDA")
+        client.post.assert_not_called()
+        assert "escalate_to_staff" not in ctx.deps._once
 
     async def test_already_escalated_this_turn(self, mock_settings):
         """Si _once ya contiene 'escalate_to_staff', no debe hacer HTTP."""
         ctx = _make_ctx(once={"escalate_to_staff"})
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert "ya fue notificado" in result
         client.post.assert_not_called()
 
@@ -86,7 +94,7 @@ class TestEscalateGuards:
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "")
+            result = await escalate_to_staff(ctx, "", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_VALIDACION")
         client.post.assert_not_called()
         assert "escalate_to_staff" not in ctx.deps._once
@@ -95,35 +103,8 @@ class TestEscalateGuards:
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "   \n\t ")
+            result = await escalate_to_staff(ctx, "   \n\t ", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_VALIDACION")
-        client.post.assert_not_called()
-
-    async def test_missing_owner_wa_id(self):
-        ctx = _make_ctx()
-        client = _make_async_client()
-        with patch("yalti.settings") as s:
-            s.OWNER_WA_ID = ""
-            s.WHATSAPP_ACCESS_TOKEN = "token-abc"
-            s.WHATSAPP_API_VERSION = "v18.0"
-            s.PHONE_NUMBER_ID = "phone-123"
-            with patch("httpx.AsyncClient", return_value=client):
-                result = await escalate_to_staff(ctx, "pregunta")
-        assert result.startswith("ERROR_INTERNO")
-        client.post.assert_not_called()
-        assert "escalate_to_staff" not in ctx.deps._once
-
-    async def test_missing_credentials(self):
-        ctx = _make_ctx()
-        client = _make_async_client()
-        with patch("yalti.settings") as s:
-            s.OWNER_WA_ID = "5215599999999"
-            s.WHATSAPP_ACCESS_TOKEN = ""
-            s.WHATSAPP_API_VERSION = "v18.0"
-            s.PHONE_NUMBER_ID = "phone-123"
-            with patch("httpx.AsyncClient", return_value=client):
-                result = await escalate_to_staff(ctx, "pregunta")
-        assert result.startswith("ERROR_INTERNO")
         client.post.assert_not_called()
 
 
@@ -131,8 +112,8 @@ class TestEscalateGuards:
 # Errores HTTP / red
 # ---------------------------------------------------------------------------
 
-class TestEscalateHttpErrors:
 
+class TestEscalateHttpErrors:
     async def test_http_4xx(self, mock_settings):
         ctx = _make_ctx()
         response = MagicMock(status_code=400, text="bad request")
@@ -141,7 +122,7 @@ class TestEscalateHttpErrors:
         )
         client = _make_async_client(post_return=response)
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_INTERNO")
 
     async def test_http_5xx(self, mock_settings):
@@ -152,22 +133,21 @@ class TestEscalateHttpErrors:
         )
         client = _make_async_client(post_return=response)
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_INTERNO")
 
     async def test_timeout(self, mock_settings):
         ctx = _make_ctx()
         client = _make_async_client(post_side_effect=httpx.TimeoutException("timeout"))
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_INTERNO")
-        assert "timeout" in result.lower()
 
     async def test_network_error(self, mock_settings):
         ctx = _make_ctx()
         client = _make_async_client(post_side_effect=httpx.ConnectError("no route"))
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_INTERNO")
 
 
@@ -175,27 +155,25 @@ class TestEscalateHttpErrors:
 # Happy path — payload y URL
 # ---------------------------------------------------------------------------
 
-class TestEscalateHappyPath:
 
+class TestEscalateHappyPath:
     async def test_returns_success_message(self, mock_settings):
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "¿Tienen nueces sin sal?")
+            result = await escalate_to_staff(ctx, "¿Tienen nueces sin sal?", customer_wanted_to_escalate=True)
         assert result == "Notificación enviada al dueño de la tienda."
         assert "escalate_to_staff" in ctx.deps._once
 
-    async def test_payload_shape_and_url(self, mock_settings):
+    async def test_payload_shape(self, mock_settings):
+        """URL/headers son responsabilidad de whatsapp_client (ver su test propio).
+        Aquí sólo verificamos que escalate_to_staff arma el payload correcto."""
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            await escalate_to_staff(ctx, "¿Tienen nueces sin sal?")
+            await escalate_to_staff(ctx, "¿Tienen nueces sin sal?", customer_wanted_to_escalate=True)
 
-        call = client.post.call_args
-        url = call.args[0]
-        assert url == "https://graph.facebook.com/v18.0/phone-123/messages"
-
-        payload = call.kwargs["json"]
+        payload = client.post.call_args.kwargs["json"]
         assert payload["to"] == "5215599999999"
         assert payload["messaging_product"] == "whatsapp"
         assert payload["type"] == "text"
@@ -205,15 +183,12 @@ class TestEscalateHappyPath:
         assert "5215512345678" in body
         assert "¿Tienen nueces sin sal?" in body
 
-        headers = call.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer token-abc"
-
     async def test_message_is_trimmed(self, mock_settings):
         """Espacios alrededor del mensaje no llegan al body."""
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            await escalate_to_staff(ctx, "   hola dueño   ")
+            await escalate_to_staff(ctx, "   hola dueño   ", customer_wanted_to_escalate=True)
         body = client.post.call_args.kwargs["json"]["text"]["body"]
         assert "hola dueño" in body
         assert "   hola dueño" not in body
@@ -223,7 +198,7 @@ class TestEscalateHappyPath:
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            await escalate_to_staff(ctx, "primera")
-            result2 = await escalate_to_staff(ctx, "segunda")
+            await escalate_to_staff(ctx, "primera", customer_wanted_to_escalate=True)
+            result2 = await escalate_to_staff(ctx, "segunda", customer_wanted_to_escalate=True)
         assert "ya fue notificado" in result2
         assert client.post.call_count == 1

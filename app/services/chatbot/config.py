@@ -34,6 +34,12 @@ class Settings:
     POSTGRES_PORT: str = field(default_factory=lambda: os.getenv("POSTGRES_PORT", "5432"))
     POSTGRES_DB: str = field(default_factory=lambda: os.getenv("POSTGRES_DB", "chatbot"))
 
+    def __post_init__(self):
+        if not self.WHATSAPP_ACCESS_TOKEN or not self.OWNER_WA_ID:
+            raise ValueError(
+                "Required settings missing: WHATSAPP_ACCESS_TOKEN and OWNER_WA_ID must be configured."
+            )
+
 
 settings = Settings()
 

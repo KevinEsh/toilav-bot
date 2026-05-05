@@ -46,6 +46,18 @@ async def webhook_get(
         return JSONResponse({"status": "error", "message": "Missing parameters"}, status_code=400)
 
 
+def is_status_update(body: dict) -> bool:
+    """Check if the webhook payload is a WhatsApp status update (delivered/read/sent)."""
+    entry = body.get("entry")
+    if not entry or not isinstance(entry, list) or len(entry) == 0:
+        return False
+    changes = entry[0].get("changes")
+    if not changes or not isinstance(changes, list) or len(changes) == 0:
+        return False
+    value = changes[0].get("value", {})
+    return "statuses" in value
+
+
 @router.post("/webhook", dependencies=[Depends(verify_signature)], response_model=None)
 async def webhook_post(request: Request) -> dict[str, str] | JSONResponse:
     """Handle incoming webhook events from the WhatsApp API.
@@ -55,16 +67,16 @@ async def webhook_post(request: Request) -> dict[str, str] | JSONResponse:
     """
     body = await request.json()
 
+    # Status updates don't have messages; handle before the messages check
+    if is_status_update(body):
+        logging.info("Received a WhatsApp status update.")
+        return {"status": "ok"}
+
     if not is_valid_whatsapp_message(body):
         return JSONResponse(
             {"status": "error", "message": "Not a WhatsApp API event"},
             status_code=404,
         )
-
-    # Check if it's a WhatsApp status update
-    if body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("statuses"):
-        logging.info("Received a WhatsApp status update.")
-        return {"status": "ok"}
 
     task = asyncio.create_task(process_whatsapp_message(body))
     task.add_done_callback(_log_task_exception)

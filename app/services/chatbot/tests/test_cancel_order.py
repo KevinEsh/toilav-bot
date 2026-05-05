@@ -1,6 +1,6 @@
 """Tests for cancel_order tool in yalti.py.
 
-Validaciones de estado y happy path mockean Session.
+Validaciones de estado y happy path parchean yalti.get_session.
 El tool-gating (_hide_when_no_order) se prueba a nivel de prepare, no aquí.
 """
 
@@ -8,51 +8,77 @@ import os
 import sys
 
 _chatbot_dir = os.path.join(os.path.dirname(__file__), "..")
-_db_dir = os.path.normpath(os.path.join(_chatbot_dir, "..", "database"))
-for _p in [_chatbot_dir, _db_dir]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _chatbot_dir not in sys.path:
+    sys.path.insert(0, _chatbot_dir)
 
-from unittest.mock import MagicMock, patch
+from contextlib import asynccontextmanager
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from chatbot_schema import OrderStatus
-from yalti import ChatDeps, StoreInfo, cancel_order
+from models import OrderRow, StoreRow
+from yalti import ChatDeps, cancel_order
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _make_get_session(session):
+    """Returns a get_session replacement that yields the given mock session."""
+    @asynccontextmanager
+    async def _cm():
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+    return _cm
+
+
+def _make_session(order_row=None):
+    """AsyncMock session whose execute() returns the given row dict or None."""
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.first.return_value = order_row
+    mock_session.execute.return_value = mock_result
+    return mock_session
+
+
 def _make_ctx(active_order_id=99):
     customer = MagicMock()
     customer.c_id = 1
     customer.c_name = "Test User"
+    active_order = (
+        OrderRow(
+            o_id=active_order_id, o_total=Decimal("0"), o_subtotal=Decimal("0"),
+            o_shipping_amount=Decimal("0"), o_currency="MXN", o_customer_notes="", o_status="PENDING_STORE_APPROVAL",
+        )
+        if active_order_id is not None
+        else None
+    )
     deps = ChatDeps(
         customer=customer,
-        store=StoreInfo(s_id=1, name="Test Store", description="", properties={}),
+        store=StoreRow(s_id=1, s_name="Test Store", s_description=""),
         products="",
-        active_order_id=active_order_id,
+        active_order=active_order,
     )
     ctx = MagicMock()
     ctx.deps = deps
     return ctx
 
 
-def _make_session(order=None):
-    """Construye un mock de Session listo para usar como context manager."""
-    mock_session = MagicMock()
-    mock_session.__enter__ = MagicMock(return_value=mock_session)
-    mock_session.__exit__ = MagicMock(return_value=False)
-    mock_session.get.return_value = order
-    return mock_session
-
-
-def _make_order(o_id=99, status=OrderStatus.PENDING_STORE_APPROVAL):
-    order = MagicMock()
-    order.o_id = o_id
-    order.o_status = status
-    return order
+def _order_row(o_id=99, status="PENDING_STORE_APPROVAL"):
+    return {
+        "o_id": o_id,
+        "o_status": status,
+        "o_total": Decimal("0.00"),
+        "o_subtotal": Decimal("0.00"),
+        "o_shipping_amount": Decimal("0.00"),
+        "o_currency": "MXN",
+        "o_customer_notes": "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -63,41 +89,36 @@ class TestCancelOrderDbValidations:
 
     @pytest.mark.asyncio
     async def test_order_not_found_in_db(self):
-        """session.get retorna None → ERROR_INTERNO, no AttributeError."""
+        """execute retorna None → ERROR_INTERNO, no AttributeError."""
+        session = _make_session(order_row=None)
         ctx = _make_ctx(active_order_id=99)
-        mock_session = _make_session(order=None)
-        with patch("yalti.Session", return_value=mock_session):
+        with patch("yalti.get_session", _make_get_session(session)):
             result = await cancel_order(ctx)
         assert result.startswith("ERROR_INTERNO:")
         assert "o_id=99" in result
-        mock_session.commit.assert_not_called()
-        assert ctx.deps.active_order_id == 99  # no se tocó
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99
 
     @pytest.mark.asyncio
     async def test_order_already_cancelled(self):
-        """Orden ya cancelada → ERROR_VALIDACION, sin commit."""
-        ctx = _make_ctx(active_order_id=99)
-        order = _make_order(status=OrderStatus.CANCELLED)
-        mock_session = _make_session(order=order)
-        with patch("yalti.Session", return_value=mock_session):
+        """Orden ya cancelada → ERROR_VALIDACION, sin UPDATE."""
+        session = _make_session(order_row=_order_row(status="CANCELLED"))
+        ctx = _make_ctx()
+        with patch("yalti.get_session", _make_get_session(session)):
             result = await cancel_order(ctx)
         assert result.startswith("ERROR_VALIDACION:")
-        assert "cancelled" in result
-        mock_session.commit.assert_not_called()
-        assert ctx.deps.active_order_id == 99
+        assert "CANCELLED" in result
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99
 
     @pytest.mark.asyncio
     async def test_order_already_completed(self):
-        """Orden completada → ERROR_VALIDACION, sin commit."""
-        ctx = _make_ctx(active_order_id=99)
-        order = _make_order(status=OrderStatus.COMPLETED)
-        mock_session = _make_session(order=order)
-        with patch("yalti.Session", return_value=mock_session):
+        """Orden completada → ERROR_VALIDACION, sin UPDATE."""
+        session = _make_session(order_row=_order_row(status="COMPLETED"))
+        ctx = _make_ctx()
+        with patch("yalti.get_session", _make_get_session(session)):
             result = await cancel_order(ctx)
         assert result.startswith("ERROR_VALIDACION:")
-        assert "completed" in result
-        mock_session.commit.assert_not_called()
-        assert ctx.deps.active_order_id == 99
+        assert "COMPLETED" in result
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99
 
 
 # ---------------------------------------------------------------------------
@@ -108,31 +129,24 @@ class TestCancelOrderHappyPath:
 
     @pytest.mark.asyncio
     async def test_cancel_pending_approval_order(self):
-        ctx = _make_ctx(active_order_id=99)
-        order = _make_order(status=OrderStatus.PENDING_STORE_APPROVAL)
-        mock_session = _make_session(order=order)
-        with patch("yalti.Session", return_value=mock_session):
+        session = _make_session(order_row=_order_row(status="PENDING_STORE_APPROVAL"))
+        ctx = _make_ctx()
+        with patch("yalti.get_session", _make_get_session(session)):
             result = await cancel_order(ctx)
-
-        assert order.o_status == OrderStatus.CANCELLED
-        mock_session.add.assert_called_once_with(order)
-        mock_session.commit.assert_called_once()
-        assert ctx.deps.active_order_id is None
-        assert "cancelado" in result
+        session.commit.assert_called_once()
+        assert ctx.deps.active_order is None
+        assert "CANCELLED" in result
         assert "o_id=99" in result
 
     @pytest.mark.asyncio
     async def test_cancel_consumer_reviewing_order(self):
-        ctx = _make_ctx(active_order_id=99)
-        order = _make_order(status=OrderStatus.CONSUMER_REVIEWING)
-        mock_session = _make_session(order=order)
-        with patch("yalti.Session", return_value=mock_session):
+        session = _make_session(order_row=_order_row(status="CONSUMER_REVIEWING"))
+        ctx = _make_ctx()
+        with patch("yalti.get_session", _make_get_session(session)):
             result = await cancel_order(ctx)
-
-        assert order.o_status == OrderStatus.CANCELLED
-        mock_session.commit.assert_called_once()
-        assert ctx.deps.active_order_id is None
-        assert "cancelado" in result
+        session.commit.assert_called_once()
+        assert ctx.deps.active_order is None
+        assert "CANCELLED" in result
 
 
 # ---------------------------------------------------------------------------
@@ -142,24 +156,21 @@ class TestCancelOrderHappyPath:
 class TestCancelOrderDbException:
 
     @pytest.mark.asyncio
-    async def test_db_exception_on_get_returns_error_interno(self):
-        ctx = _make_ctx(active_order_id=99)
-        mock_session = _make_session()
-        mock_session.get.side_effect = Exception("DB timeout")
-        with patch("yalti.Session", return_value=mock_session):
+    async def test_db_exception_on_execute_returns_error_interno(self):
+        session = AsyncMock()
+        session.execute.side_effect = Exception("DB timeout")
+        ctx = _make_ctx()
+        with patch("yalti.get_session", _make_get_session(session)):
             result = await cancel_order(ctx)
-
         assert result.startswith("ERROR_INTERNO:")
-        assert ctx.deps.active_order_id == 99  # no se limpió
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99
 
     @pytest.mark.asyncio
     async def test_db_exception_on_commit_returns_error_interno(self):
-        ctx = _make_ctx(active_order_id=99)
-        order = _make_order(status=OrderStatus.PENDING_STORE_APPROVAL)
-        mock_session = _make_session(order=order)
-        mock_session.commit.side_effect = Exception("connection lost")
-        with patch("yalti.Session", return_value=mock_session):
+        session = _make_session(order_row=_order_row(status="PENDING_STORE_APPROVAL"))
+        session.commit.side_effect = Exception("connection lost")
+        ctx = _make_ctx()
+        with patch("yalti.get_session", _make_get_session(session)):
             result = await cancel_order(ctx)
-
         assert result.startswith("ERROR_INTERNO:")
-        assert ctx.deps.active_order_id == 99  # no se limpió
+        assert ctx.deps.active_order is not None and ctx.deps.active_order.o_id == 99

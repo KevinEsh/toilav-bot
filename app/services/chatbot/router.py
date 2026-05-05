@@ -11,7 +11,6 @@ Code in _validate_phase_transition() enforces which transitions are valid.
 
 import logging
 
-from chatbot_schema import ConversationPhase
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Output model
 # ---------------------------------------------------------------------------
 class PhaseRouterOutput(BaseModel):
-    phase: ConversationPhase = Field(
+    phase: str = Field(
         description="La fase más apropiada para manejar el mensaje actual."
     )
     reasoning: str = Field(
@@ -67,45 +66,20 @@ _router_agent: Agent[None, PhaseRouterOutput] = Agent(
 # Stable phases sustain multi-turn exchanges within themselves.
 # Once one is established (history exists), the executor's structured output
 # signals transitions via `suggested_next_phase` — no router call needed.
-_STABLE_PHASES = {
-    ConversationPhase.QA_LOOP,
-    ConversationPhase.ORDER_BUILDING,
-    ConversationPhase.COLLECTING_DETAILS,
-    ConversationPhase.PENDING_DELIVERY,
-    ConversationPhase.DELIVERY_IN_COURSE,
-}
+_STABLE_PHASES = {"qa_loop", "order_building", "collecting_details", "pending_delivery", "delivery_in_course"}
 
 # Phases that can only be advanced by owner commands — router can never set them
-_OWNER_ONLY_PHASES = {
-    ConversationPhase.PENDING_APPROVAL,
-    ConversationPhase.PENDING_PAYMENT,
-    ConversationPhase.PENDING_DELIVERY,
-    ConversationPhase.DELIVERY_IN_COURSE,
-    ConversationPhase.COMPLETED,
-}
+_OWNER_ONLY_PHASES = {"pending_approval", "pending_payment", "pending_delivery", "delivery_in_course", "completed"}
 
 # Allowed router-driven transitions per current phase
-_ALLOWED_TRANSITIONS: dict[ConversationPhase, set[ConversationPhase]] = {
-    ConversationPhase.GREETING: {
-        ConversationPhase.GREETING,
-        ConversationPhase.QA_LOOP,
-        ConversationPhase.ORDER_BUILDING,
-    },
-    ConversationPhase.QA_LOOP: {
-        ConversationPhase.QA_LOOP,
-        ConversationPhase.ORDER_BUILDING,
-    },
-    ConversationPhase.ORDER_BUILDING: {
-        ConversationPhase.QA_LOOP,  # Customer changed their mind
-        ConversationPhase.ORDER_BUILDING,
-    },
+_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
+    "greeting": {"greeting", "qa_loop", "order_building"},
+    "qa_loop": {"qa_loop", "order_building"},
+    "order_building": {"qa_loop", "order_building"},  # qa_loop: customer changed their mind
 }
 
 
-def validate_phase_transition(
-    current: ConversationPhase,
-    suggested: ConversationPhase,
-) -> ConversationPhase:
+def validate_phase_transition(current: str, suggested: str) -> str:
     """Pure-code guard: enforces which transitions are valid.
 
     Used both by the router (pre-execution) and by yalti (post-execution,
@@ -127,8 +101,8 @@ def validate_phase_transition(
 async def route_phase(
     message: str,
     history: list,
-    current_phase: ConversationPhase,
-) -> ConversationPhase:
+    current_phase: str,
+) -> str:
     """Classify the incoming message and return the phase that should handle it.
 
     Skips the LLM call when:
@@ -153,8 +127,8 @@ async def route_phase(
         suggested = result.output.phase
         logger.info(
             "Router: %s → %s | reason: %s",
-            current_phase.value,
-            suggested.value,
+            current_phase,
+            suggested,
             result.output.reasoning,
         )
         return validate_phase_transition(current_phase, suggested)
