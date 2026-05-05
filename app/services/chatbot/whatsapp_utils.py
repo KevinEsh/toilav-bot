@@ -27,7 +27,7 @@ from yalti import agent_generate_response
 
 logger = logging.getLogger(__name__)
 
-MAX_USER_BUFFERS = 50
+MAX_USER_BUFFERS = 150
 DEBOUNCE_SECONDS = 4  # Tiempo de espera antes de procesar mensajes acumulados
 
 
@@ -154,7 +154,7 @@ def struct_message_from_payload(body) -> WhatsappMessage | None:
         contact = WhatsappUser(
             wa_id=contact_info["wa_id"],
             name=contact_info["profile"]["name"],
-            phone=value["metadata"]["display_phone_number"],
+            phone=contact_info["wa_id"],
         )
 
         if message_info.get("type") == "text":
@@ -266,7 +266,8 @@ async def handle_approve(args: str) -> None:
     # Verificar que la orden exista y esté pendiente de aprobación. Extraer la info del cliente para notificarlo.
     async with get_session() as session:
         query_args = {"o_id": o_id, "o_status": "PENDING_STORE_APPROVAL"}
-        row = await session.execute(get_order_query, query_args).mappings().first()
+        result = await session.execute(get_order_query, query_args)
+        row = result.mappings().first()
 
         # Si no se encuentra la orden o no está en estado correcto, notificar al dueño y salir
         if row is None:
@@ -320,7 +321,8 @@ async def handle_reject(args: str) -> None:
 
     async with get_session() as session:
         query_args = {"o_id": o_id, "o_status": "PENDING_STORE_APPROVAL"}
-        row = await session.execute(get_order_query, query_args).mappings().first()
+        row_result = await session.execute(get_order_query, query_args)
+        row = row_result.mappings().first()
 
         if row is None:
             await send_text_message(

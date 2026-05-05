@@ -31,7 +31,6 @@ def _make_ctx(once=None):
         customer=customer,
         store=StoreRow(s_id=1, s_name="Test Store", s_description=""),
         products="",
-        session=AsyncMock(),
     )
     if once:
         deps._once.update(once)
@@ -72,12 +71,22 @@ def mock_settings():
 
 
 class TestEscalateGuards:
+    async def test_customer_did_not_confirm_escalation(self):
+        """Si customer_wanted_to_escalate=False, no debe hacer HTTP y pide que pregunte primero."""
+        ctx = _make_ctx()
+        client = _make_async_client()
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=False)
+        assert result.startswith("ACCION_REQUERIDA")
+        client.post.assert_not_called()
+        assert "escalate_to_staff" not in ctx.deps._once
+
     async def test_already_escalated_this_turn(self, mock_settings):
         """Si _once ya contiene 'escalate_to_staff', no debe hacer HTTP."""
         ctx = _make_ctx(once={"escalate_to_staff"})
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert "ya fue notificado" in result
         client.post.assert_not_called()
 
@@ -85,7 +94,7 @@ class TestEscalateGuards:
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "")
+            result = await escalate_to_staff(ctx, "", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_VALIDACION")
         client.post.assert_not_called()
         assert "escalate_to_staff" not in ctx.deps._once
@@ -94,7 +103,7 @@ class TestEscalateGuards:
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "   \n\t ")
+            result = await escalate_to_staff(ctx, "   \n\t ", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_VALIDACION")
         client.post.assert_not_called()
 
@@ -113,7 +122,7 @@ class TestEscalateHttpErrors:
         )
         client = _make_async_client(post_return=response)
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_INTERNO")
 
     async def test_http_5xx(self, mock_settings):
@@ -124,21 +133,21 @@ class TestEscalateHttpErrors:
         )
         client = _make_async_client(post_return=response)
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_INTERNO")
 
     async def test_timeout(self, mock_settings):
         ctx = _make_ctx()
         client = _make_async_client(post_side_effect=httpx.TimeoutException("timeout"))
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_INTERNO")
 
     async def test_network_error(self, mock_settings):
         ctx = _make_ctx()
         client = _make_async_client(post_side_effect=httpx.ConnectError("no route"))
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "pregunta")
+            result = await escalate_to_staff(ctx, "pregunta", customer_wanted_to_escalate=True)
         assert result.startswith("ERROR_INTERNO")
 
 
@@ -152,7 +161,7 @@ class TestEscalateHappyPath:
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            result = await escalate_to_staff(ctx, "¿Tienen nueces sin sal?")
+            result = await escalate_to_staff(ctx, "¿Tienen nueces sin sal?", customer_wanted_to_escalate=True)
         assert result == "Notificación enviada al dueño de la tienda."
         assert "escalate_to_staff" in ctx.deps._once
 
@@ -162,7 +171,7 @@ class TestEscalateHappyPath:
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            await escalate_to_staff(ctx, "¿Tienen nueces sin sal?")
+            await escalate_to_staff(ctx, "¿Tienen nueces sin sal?", customer_wanted_to_escalate=True)
 
         payload = client.post.call_args.kwargs["json"]
         assert payload["to"] == "5215599999999"
@@ -179,7 +188,7 @@ class TestEscalateHappyPath:
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            await escalate_to_staff(ctx, "   hola dueño   ")
+            await escalate_to_staff(ctx, "   hola dueño   ", customer_wanted_to_escalate=True)
         body = client.post.call_args.kwargs["json"]["text"]["body"]
         assert "hola dueño" in body
         assert "   hola dueño" not in body
@@ -189,7 +198,7 @@ class TestEscalateHappyPath:
         ctx = _make_ctx()
         client = _make_async_client()
         with patch("httpx.AsyncClient", return_value=client):
-            await escalate_to_staff(ctx, "primera")
-            result2 = await escalate_to_staff(ctx, "segunda")
+            await escalate_to_staff(ctx, "primera", customer_wanted_to_escalate=True)
+            result2 = await escalate_to_staff(ctx, "segunda", customer_wanted_to_escalate=True)
         assert "ya fue notificado" in result2
         assert client.post.call_count == 1

@@ -7,10 +7,8 @@ import os
 import sys
 
 _chatbot_dir = os.path.join(os.path.dirname(__file__), "..")
-_db_dir = os.path.normpath(os.path.join(_chatbot_dir, "..", "database"))
-for _p in [_chatbot_dir, _db_dir]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _chatbot_dir not in sys.path:
+    sys.path.insert(0, _chatbot_dir)
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -53,7 +51,6 @@ def _make_ctx(once=None, products=None):
         customer=customer,
         store=StoreRow(s_id=1, s_name="Test Store", s_description=""),
         products=products if products is not None else {},
-        session=AsyncMock(),
     )
     if once:
         deps._once.update(once)
@@ -247,7 +244,7 @@ class TestShowProductsHttpErrors:
         with patch("yalti.whatsapp_client.post_message", new=mock_post):
             result = await show_products(ctx, [1, 2])
         assert result.startswith("ERROR_INTERNO")
-        assert "show_products" not in ctx.deps._once  # permite retry
+        assert "show_products" in ctx.deps._once  # bloquea reintentos en el mismo turno
 
     async def test_http_error_on_first_aborts_nothing_sent(self, mock_settings, mock_catalog):
         ctx = _make_ctx(products=mock_catalog)
@@ -257,7 +254,7 @@ class TestShowProductsHttpErrors:
         with patch("yalti.whatsapp_client.post_message", new=mock_post):
             result = await show_products(ctx, [1, 2])
         assert result.startswith("ERROR_INTERNO")
-        assert "show_products" not in ctx.deps._once
+        assert "show_products" in ctx.deps._once
 
     async def test_partial_send_marks_once_and_reports(self, mock_settings, mock_catalog):
         """Primer producto OK, segundo falla → _once se marca (ya llegó algo al cliente)."""

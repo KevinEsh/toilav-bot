@@ -11,6 +11,7 @@ from models import CustomerRow, OrderItemRow, OrderRow, ProductRow, StoreRow
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_core import to_jsonable_python
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = getLogger(__name__)
@@ -175,21 +176,33 @@ products_cache: TTLCache[dict[str, ProductRow]] = TTLCache(loader=load_products,
 
 
 async def upsert_customer(session, whatsapp_id: str, phone: str, name: str) -> CustomerRow:
-    """Upserts a customer by whatsapp_id and returns the row. Single query via ON CONFLICT."""
+    """Upserts a customer by whatsapp_id and returns the row.
 
-    # async with get_session() as session:
-    upsert_customer_query = text("""
+    Uses INSERT ... ON CONFLICT (c_whatsapp_id) as the fast path.
+    Falls back to SELECT on IntegrityError: PostgreSQL checks unique indexes in
+    creation order, so ix_customers_c_phone can fire before the c_whatsapp_id
+    constraint when two concurrent inserts race for the same customer.
+    """
+    upsert_query = text("""
         INSERT INTO customers (c_phone, c_whatsapp_id, c_name, c_status)
         VALUES (:c_phone, :whatsapp_id, :name, :c_status)
         ON CONFLICT (c_whatsapp_id) DO UPDATE SET c_name = EXCLUDED.c_name
         RETURNING c_id, c_name, c_whatsapp_id
     """)
+    select_query = text("""
+        SELECT c_id, c_name, c_whatsapp_id FROM customers WHERE c_whatsapp_id = :whatsapp_id
+    """)
 
     args = {"whatsapp_id": whatsapp_id, "c_phone": phone, "name": name, "c_status": "ACTIVE"}
-    result = await session.execute(upsert_customer_query, args)
-    row = result.mappings().first()
-
-    return CustomerRow(**row)
+    try:
+        result = await session.execute(upsert_query, args)
+        row = result.mappings().first()
+        return CustomerRow(**row)
+    except IntegrityError:
+        await session.rollback()
+        result = await session.execute(select_query, {"whatsapp_id": whatsapp_id})
+        row = result.mappings().first()
+        return CustomerRow(**row)
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +235,7 @@ class ConversationsCache:
         self._store.pop(c_id, None)
 
 
-conversations_cache = ConversationsCache()
+conversations_cache = ConversationsCache(max_entries=100)
 
 
 # ---------------------------------------------------------------------------

@@ -28,8 +28,9 @@ def _build_url() -> str:
 
 engine = create_async_engine(
     _build_url(),
-    pool_size=10,
-    max_overflow=5,
+    pool_size=30,
+    max_overflow=20,
+    pool_timeout=10,
     pool_pre_ping=True,
     echo=False,
 )
